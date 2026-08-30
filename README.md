@@ -92,8 +92,8 @@ To iterate on the Go service alone, [.devcontainer](.devcontainer) builds the
 ### Tests
 
 ```bash
-cd app && go vet ./... && go test ./...
-cd pdf-sidecar && go vet ./...
+(cd app && go vet ./... && go test ./...)
+(cd pdf-sidecar && go vet ./...)
 ```
 
 ### Dependency image pinning
@@ -125,7 +125,7 @@ File API reads its configuration from the environment. `JWT_SECRET` (or
 | `SMTP_FROM` | `file-api@localhost` | Alert sender |
 | `ALERT_EMAILS` | empty | Comma-separated alert recipients |
 
-Moderation behaviour, on-disk scan metadata, the retry queue, and the metadata
+Moderation behavior, on-disk scan metadata, the retry queue, and the metadata
 endpoint are documented in
 [docs/moderation-integration.md](docs/moderation-integration.md).
 

@@ -6,7 +6,7 @@ Please report security issues **privately** using GitHub's [private vulnerabilit
 
 If you cannot use GitHub advisories, email <c@miic.at>.
 
-Please include the affected version or image digest, a description of the impact, and the smallest reproduction you can manage. You will get an acknowledgement, and a fix or an explanation of why the behaviour is intended. This is a small project maintained by one person, so please allow reasonable time before disclosing publicly.
+Please include the affected version or image digest, a description of the impact, and the smallest reproduction you can manage. You will get an acknowledgement, and a fix or an explanation of why the behavior is intended. This is a small project maintained by one person, so please allow reasonable time before disclosing publicly.
 
 ## Supported versions
 
@@ -16,14 +16,14 @@ Only the most recent release receives security fixes. Released images are immuta
 
 The security of a deployment depends on assumptions this repository cannot enforce on its own. They are stated here so they can be checked rather than guessed:
 
-- **File API is designed to sit behind a reverse proxy** that terminates TLS and applies caching, rate limiting, and request-body limits. Its own limits are defence in depth, not a replacement.
+- **File API is designed to sit behind a reverse proxy** that terminates TLS and applies caching, rate limiting, and request-body limits. Its own limits are defense in depth, not a replacement.
 - **The two scanners are unauthenticated** and are reached over a private container network. They must never be published to an untrusted network. See their own security policies.
 - **`JWT_SECRET` is required and fails closed.** The service refuses to start when it is missing or shorter than 32 characters. It is an HMAC secret shared with every application that issues tokens; treat it as a credential.
 - **Uploads require a token with the `upload` scope**, and private file access checks the token's client code against the requested path.
 
 ## In scope
 
-- Authentication or authorisation bypass: serving a private file without a valid token, or across client codes
+- Authentication or authorization bypass: serving a private file without a valid token, or across client codes
 - Path traversal or filename handling that escapes the storage root
 - Server-side request forgery in the fetch path, or bypass of its scheme and private-address restrictions
 - Token forgery, replay, or scope escalation
