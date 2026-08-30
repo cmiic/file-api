@@ -29,8 +29,10 @@ API, and two scanners screen every upload asynchronously.
 
 All six services are designed to run on one host behind a reverse proxy that
 terminates TLS and applies caching, rate limiting, and upload limits. Only File
-API, imgproxy, and the PDF sidecar are ever reachable from that proxy; **the two
-scanners are unauthenticated and must stay on a private network.**
+API, imgproxy, and the PDF sidecar need to be reachable from that proxy, so
+`compose.dev.yaml` publishes ports for those three and reaches ClamAV and the
+two scanners over the Compose network only. Consult each scanner's own
+documentation before changing that.
 
 Production topology, TLS, digest pinning, host provisioning, upgrade and
 rollback procedures, and the database integration plugin are maintained
