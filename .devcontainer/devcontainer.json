@@ -1,0 +1,21 @@
+{
+    "name": "Go File API (Live Reloading)",
+    "build": {
+        "dockerfile": "../Dockerfile",
+        "target": "builder"
+    },
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "golang.Go",
+                "ms-azuretools.vscode-docker"
+            ]
+        }
+    },
+    "remoteUser": "root",
+    "mounts": [
+        "source=dev_file_storage,target=/data/files,type=volume"
+    ],
+    "postStartCommand": "air -c .air.toml",
+    "forwardPorts": [7532]
+}

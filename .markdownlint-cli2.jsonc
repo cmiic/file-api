@@ -1,0 +1,9 @@
+{
+  "config": {
+    "extends": ".markdownlint.json"
+  },
+  "globs": ["**/*.md"],
+  "ignores": [
+    "tmp/"
+  ]
+}

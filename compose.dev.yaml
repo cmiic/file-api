@@ -1,0 +1,210 @@
+# Local development stack for File API.
+#
+# File API and its PDF sidecar are built from this checkout. Everything else is
+# pulled from published images. This file is for development only: it is not a
+# deployment artifact, and production topology, digest pinning, host setup, and
+# edge configuration are maintained separately.
+#
+# Compose reads .env from this directory; put JWT_SECRET and MEDIA_MODEL_FILE
+# there once and every command below picks them up:
+#
+#   printf 'JWT_SECRET=%s\nMEDIA_MODEL_FILE=./tmp/640m.onnx\n' "$(openssl rand -hex 32)" > .env
+#   docker compose -f compose.dev.yaml up --build
+#
+# Host ports default to 8080 (file-api), 8081 (imgproxy), and 8082 (PDF
+# sidecar); override FILE_API_PORT, IMGPROXY_PORT, or PDF_SIDECAR_PORT when
+# something else already holds one. The host side of every mapping is pinned to
+# 127.0.0.1 and is deliberately not configurable.
+#
+# JWT_SECRET has no default: File API fails closed when it is missing or shorter
+# than 32 characters.
+#
+# MEDIA_MODEL_FILE must point at a provisioned NudeNet 640m.onnx. It is not
+# redistributed in the media screener image; get it with scripts/provision-model.sh
+# from https://github.com/cmiic/media-screener-api, which verifies its checksum.
+
+services:
+  file-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      PORT: "8080"
+      BASE_PATH: /data/files
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET to at least 32 characters}
+      MAX_UPLOAD_SIZE: ${MAX_UPLOAD_SIZE:-209715200}
+      # Scanners are reached over the compose network by service name. They are
+      # unauthenticated and must never be published to an untrusted network.
+      MALWARE_SCANNER_URL: http://malware-scanner-api:8080
+      MEDIA_SCREENER_URL: http://media-screener-api:8080
+      SCAN_TIMEOUT_MS: ${SCAN_TIMEOUT_MS:-60000}
+      SCAN_META_PATH: /data/scan-meta
+      SCAN_QUEUE_PATH: /data/scan-queue
+      # Email alerts are optional; an empty SMTP_HOST disables them.
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-25}
+      SMTP_FROM: ${SMTP_FROM:-file-api@localhost}
+      ALERT_EMAILS: ${ALERT_EMAILS:-}
+    volumes:
+      - file-api-files:/data/files
+      - file-api-scan-meta:/data/scan-meta
+      - file-api-scan-queue:/data/scan-queue
+    tmpfs:
+      - /tmp:mode=1777,size=64M
+    ports:
+      - 127.0.0.1:${FILE_API_PORT:-8080}:8080
+    healthcheck:
+      test: [CMD, curl, -fsS, "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    # No depends_on: moderation is asynchronous. File API queues and retries
+    # when a scanner is unavailable — see docs/moderation-integration.md.
+
+  file-api-pdf-sidecar:
+    build:
+      context: ./pdf-sidecar
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      # The sidecar pulls source files from File API over the compose network.
+      FILE_API_BASE_URL: http://file-api:8080/files/
+      PATH_PREFIX: /files-rs
+      FORWARD_HEADERS: Cookie,Authorization
+      MAX_WIDTH: "1920"
+      MAX_HEIGHT: "1920"
+    tmpfs:
+      - /tmp:mode=1777,size=128M
+    ports:
+      - 127.0.0.1:${PDF_SIDECAR_PORT:-8082}:8080
+    depends_on:
+      file-api:
+        condition: service_healthy
+
+  imgproxy:
+    image: docker.io/darthsim/imgproxy:latest@sha256:22eb18453beea1d24906d39bb9dca147cd6ee1ae6943b037377691721fd90d70
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      IMGPROXY_BASE_URL: http://file-api:8080/files/
+      IMGPROXY_ALLOWED_SOURCES: http://file-api:8080/
+      IMGPROXY_SANITIZE_SVG: "true"
+      IMGPROXY_MAX_ANIMATION_FRAMES: "100"
+      IMGPROXY_MAX_ANIMATION_FRAME_RESOLUTION: "1000000"
+      IMGPROXY_MAX_WIDTH: "1920"
+      IMGPROXY_MAX_HEIGHT: "1920"
+      IMGPROXY_MAX_SRC_RESOLUTION: "16800000"
+      IMGPROXY_PATH_PREFIX: /files-rs
+      IMGPROXY_FORWARD_HEADERS: Cookie,Authorization
+    tmpfs:
+      - /tmp:mode=1777,size=256M
+    ports:
+      - 127.0.0.1:${IMGPROXY_PORT:-8081}:8080
+    depends_on:
+      file-api:
+        condition: service_healthy
+
+  clamav:
+    image: docker.io/clamav/clamav:stable-debian13-slim@sha256:967334b92d1782e4d1314ddf903ae537d26792d21c9a39adecb8ac9757980514
+    environment:
+      CLAMAV_STREAM_MAX_LENGTH: 220M
+      CLAMAV_MAX_SCAN_SIZE: 200M
+      CLAMAV_MAX_FILE_SIZE: 200M
+      CLAMAV_MAX_RECURSION: "16"
+      CLAMAV_MAX_FILES: "10000"
+      CLAMAV_PHISHING_SIGNATURES: "yes"
+      CLAMAV_PHISHING_SCAN_URLS: "yes"
+    volumes:
+      - clamav-db:/var/lib/clamav
+    healthcheck:
+      test: [CMD, clamdcheck.sh]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s
+
+  malware-scanner-api:
+    image: ghcr.io/cmiic/malware-scanner-api:v1.0.0@sha256:ae0ee56e652cba0d9893b95797cd60310070d8dbacee80a3e7b3b61d59577a44
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: "3310"
+      CLAMAV_TIMEOUT: "120"
+      MAX_FILE_SIZE: ${MAX_UPLOAD_SIZE:-209715200}
+      MAX_CONCURRENT_SCANS: "1"
+      SCAN_QUEUE_TIMEOUT_SECONDS: "5"
+      UPLOAD_TIMEOUT_SECONDS: "10"
+      SCAN_TIMEOUT_SECONDS: "40"
+    depends_on:
+      clamav:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  media-screener-api:
+    image: ghcr.io/cmiic/media-screener-api:v1.0.0@sha256:ac77e31d27f43365aef59b287d93abae74a41bc062f4221d05cad3eeaf271ec3
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      MODEL_PATH: /models/640m.onnx
+      MAX_UPLOAD_SIZE: ${MAX_UPLOAD_SIZE:-209715200}
+      MAX_PDF_PAGES: "100"
+      MAX_PDF_RENDERED_PIXELS: "100000000"
+      MAX_VIDEO_DURATION_SECONDS: "600"
+      MAX_VIDEO_SAMPLED_FRAMES: "120"
+      MAX_DOCUMENT_IMAGES: "100"
+      MAX_CONCURRENT_SCANS: "1"
+      SCAN_QUEUE_TIMEOUT_SECONDS: "5"
+      UPLOAD_TIMEOUT_SECONDS: "10"
+      PROCESSING_TIMEOUT_SECONDS: "40"
+    volumes:
+      # Provisioned by the reader; see the header comment.
+      - type: bind
+        source: ${MEDIA_MODEL_FILE:?set MEDIA_MODEL_FILE to the provisioned 640m.onnx}
+        target: /models/640m.onnx
+        read_only: true
+        bind:
+          # Ask Compose not to invent the source path. The Docker daemon still
+          # creates a directory for a missing bind source, which is why
+          # MEDIA_MODEL_FILE is required rather than defaulted: an unset
+          # variable fails immediately instead of mounting an empty directory.
+          create_host_path: false
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  file-api-files:
+  file-api-scan-meta:
+  file-api-scan-queue:
+  clamav-db:

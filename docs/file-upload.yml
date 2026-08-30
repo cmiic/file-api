@@ -1,0 +1,394 @@
+openapi: "3.0.2"
+info:
+  title: File Storage API
+  description: >-
+    High-performance file storage API with JWT authentication and on-demand image resizing via imgproxy.
+    <br><br>
+    **Authentication:** All write operations and private file access require a JWT token, passed either via
+    `Authorization: Bearer {token}` header or `jwt_token` cookie. A trusted client application issues the
+    token using the same secret configured for File API.
+    <br><br>
+    **Public vs Private:** Files under `/files/cli/{CLI_CODE}/` are private and require JWT. All other
+    `/files/` paths are public.
+    <br><br>
+    **Image Resizing:** Use `/files-rs/` endpoints for on-demand resizing via imgproxy. Original files
+    are stored once; thumbnails are generated on request.
+  version: "3.0"
+  contact:
+    name: Christoph Stadlbauer
+    email: c@miic.at
+  license:
+    name: MIT license
+servers:
+  - url: http://file-api:8080/
+    description: Internal container network
+  - url: https://your-domain.tld/
+    description: Production server (via Edge Nginx)
+  - url: http://localhost:8080/
+    description: Local development server
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token with claims `cli_code` (for private files) and `scopes` (e.g., ["upload", "read"])
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: jwt_token
+      description: JWT token as cookie (alternative to Bearer header)
+  responses:
+    UnauthorizedError:
+      description: JWT token is missing, invalid, or lacks required scope
+    ForbiddenError:
+      description: JWT token does not grant access to the requested resource
+    BadRequest:
+      description: Invalid request - check response body for error message
+    NotFound:
+      description: File not found
+    FileTooLarge:
+      description: File exceeds maximum upload size (200MB)
+  parameters:
+    cli_code:
+      in: path
+      name: CLI_CODE
+      schema:
+        type: string
+        pattern: "^[a-zA-Z0-9_-]+$"
+        maxLength: 16
+      required: true
+      description: Unique alphanumeric identifier for the client
+    relative_file_path:
+      in: path
+      name: relative_file_path
+      schema:
+        type: string
+        pattern: "^[a-zA-Z0-9_/.-]+$"
+        maxLength: 250
+      required: true
+      description: File path relative to storage root (e.g., `2025/01/abc123.jpg`)
+  schemas:
+    OrigInfo:
+      description: Information about the stored file
+      type: object
+      required:
+        - name
+        - size
+      properties:
+        name:
+          type: string
+          description: Relative path to the stored file
+          example: "2025/01/IMG_6060-fd117197340be1b7f5c6313c1af5369063555d32.jpg"
+        size:
+          type: integer
+          format: int64
+          description: File size in bytes
+          example: 446892
+        orig_width:
+          type: integer
+          description: Original image width in pixels (from client, null for non-images)
+          example: 4032
+        orig_height:
+          type: integer
+          description: Original image height in pixels (from client, null for non-images)
+          example: 3024
+        thumb_width:
+          type: integer
+          description: Custom thumbnail width (if user specified)
+          example: 300
+        thumb_height:
+          type: integer
+          description: Custom thumbnail height (if user specified)
+          example: 200
+    UploadResponse:
+      type: object
+      required:
+        - orig
+      properties:
+        orig:
+          $ref: "#/components/schemas/OrigInfo"
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: "ok"
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      description: Returns service health status
+      tags:
+        - System
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /files/{relative_file_path}:
+    parameters:
+      - $ref: "#/components/parameters/relative_file_path"
+    get:
+      summary: Get public file
+      description: >-
+        Retrieve a publicly accessible file. Files not under `/cli/` path are public and require no authentication.
+        Returns the raw file with appropriate Content-Type header.
+      tags:
+        - Files
+      responses:
+        "200":
+          description: File content
+          content:
+            "*/*":
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /files/cli/{CLI_CODE}/{relative_file_path}:
+    parameters:
+      - $ref: "#/components/parameters/cli_code"
+      - $ref: "#/components/parameters/relative_file_path"
+    get:
+      summary: Get private file
+      description: >-
+        Retrieve a file belonging to a specific client. Requires JWT authentication with matching `cli_code` claim.
+        The response includes `Cache-Control: private` header to prevent edge caching.
+      tags:
+        - Files
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      responses:
+        "200":
+          description: File content
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: "private, no-store"
+          content:
+            "*/*":
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/UnauthorizedError"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /file-upload:
+    post:
+      summary: Upload public file
+      description: >-
+        Upload a file to public storage. Requires JWT with `upload` scope.
+        The file is stored with SHA1-based deduplication. Optional dimension fields are passed through
+        to the response for client-side use.
+      tags:
+        - Upload
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The file to upload
+                orig_width:
+                  type: integer
+                  description: Original image width (extracted client-side)
+                orig_height:
+                  type: integer
+                  description: Original image height (extracted client-side)
+                thumb_width:
+                  type: integer
+                  description: Custom thumbnail width
+                thumb_height:
+                  type: integer
+                  description: Custom thumbnail height
+      responses:
+        "200":
+          description: File uploaded successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/UnauthorizedError"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+        "413":
+          $ref: "#/components/responses/FileTooLarge"
+
+  /file-upload/cli/{CLI_CODE}:
+    parameters:
+      - $ref: "#/components/parameters/cli_code"
+    post:
+      summary: Upload private file
+      description: >-
+        Upload a file to a client's private storage. Requires JWT with `upload` scope and matching `cli_code` claim.
+        Files are stored under `/files/cli/{CLI_CODE}/YYYY/MM/` path structure.
+      tags:
+        - Upload
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The file to upload
+                orig_width:
+                  type: integer
+                  description: Original image width (extracted client-side)
+                orig_height:
+                  type: integer
+                  description: Original image height (extracted client-side)
+                thumb_width:
+                  type: integer
+                  description: Custom thumbnail width
+                thumb_height:
+                  type: integer
+                  description: Custom thumbnail height
+      responses:
+        "200":
+          description: File uploaded successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/UnauthorizedError"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+        "413":
+          $ref: "#/components/responses/FileTooLarge"
+
+  /file-resize/url/{url}:
+    parameters:
+      - in: path
+        name: url
+        schema:
+          type: string
+        required: true
+        description: URL-encoded source URL to fetch
+    post:
+      summary: Fetch and store public file from URL
+      description: >-
+        Fetch a file from a remote URL and store it in public storage. Requires JWT with `upload` scope.
+        The `://` in URLs may be collapsed to `:/` by proxies; the API handles this automatically.
+      tags:
+        - Upload
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                orig_width:
+                  type: integer
+                orig_height:
+                  type: integer
+                thumb_width:
+                  type: integer
+                thumb_height:
+                  type: integer
+      responses:
+        "200":
+          description: File fetched and stored successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/UnauthorizedError"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+
+  /file-resize/cli/{CLI_CODE}/url/{url}:
+    parameters:
+      - $ref: "#/components/parameters/cli_code"
+      - in: path
+        name: url
+        schema:
+          type: string
+        required: true
+        description: URL-encoded source URL to fetch
+    post:
+      summary: Fetch and store private file from URL
+      description: >-
+        Fetch a file from a remote URL and store it in a client's private storage. 
+        Requires JWT with `upload` scope and matching `cli_code` claim.
+      tags:
+        - Upload
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                orig_width:
+                  type: integer
+                orig_height:
+                  type: integer
+                thumb_width:
+                  type: integer
+                thumb_height:
+                  type: integer
+      responses:
+        "200":
+          description: File fetched and stored successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/UnauthorizedError"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+
+tags:
+  - name: System
+    description: Health and status endpoints
+  - name: Files
+    description: File retrieval endpoints
+  - name: Upload
+    description: File upload and URL fetch endpoints

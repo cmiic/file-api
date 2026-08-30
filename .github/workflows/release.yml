@@ -1,0 +1,116 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      API_IMAGE_NAME: ghcr.io/${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+      PDF_IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/file-api-pdf-sidecar
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release tag
+        id: release_tag
+        run: |
+          set -euo pipefail
+
+          tag="${GITHUB_REF_NAME}"
+
+          if [[ ! "$tag" =~ ^v.+$ ]]; then
+            echo "Release tag must start with 'v': $tag" >&2
+            exit 1
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build and push API image
+        env:
+          TAG: ${{ steps.release_tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          docker build -t "${API_IMAGE_NAME}:${TAG}" .
+          docker push "${API_IMAGE_NAME}:${TAG}"
+
+      - name: Build and push PDF sidecar image
+        env:
+          TAG: ${{ steps.release_tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          docker build -t "${PDF_IMAGE_NAME}:${TAG}" ./pdf-sidecar
+          docker push "${PDF_IMAGE_NAME}:${TAG}"
+
+      - name: Resolve PDF sidecar GPL source
+        env:
+          TAG: ${{ steps.release_tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          package_metadata="$(docker run --rm --entrypoint dpkg-query \
+            "${PDF_IMAGE_NAME}:${TAG}" -W \
+            -f='${source:Package}|${source:Version}' poppler-utils)"
+          IFS='|' read -r source_package source_version <<< "$package_metadata"
+
+          if [[ -z "$source_package" || -z "$source_version" ]]; then
+            echo "Could not resolve the Poppler source package from the PDF sidecar image" >&2
+            exit 1
+          fi
+
+          encoded_version="$(python3 -c \
+            'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' \
+            "$source_version")"
+          source_url="https://snapshot.debian.org/package/${source_package}/${encoded_version}/"
+
+          cat > "$RUNNER_TEMP/pdf-sidecar-gpl-source.md" <<EOF
+          ## PDF sidecar GPL source
+
+          The \`${PDF_IMAGE_NAME}:${TAG}\` image includes Debian's \`poppler-utils\` binary package from source package \`${source_package} ${source_version}\`. Its exact Corresponding Source, including the upstream source and Debian packaging changes, is available from [Debian Snapshot](${source_url}).
+          EOF
+
+      - name: Create GitHub release
+        env:
+          TAG: ${{ steps.release_tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists"
+            exit 0
+          fi
+
+          gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="$TAG" > "$RUNNER_TEMP/generated-release.json"
+          jq -r '.body // ""' "$RUNNER_TEMP/generated-release.json" \
+            > "$RUNNER_TEMP/release-notes.md"
+          printf '\n\n' >> "$RUNNER_TEMP/release-notes.md"
+          cat "$RUNNER_TEMP/pdf-sidecar-gpl-source.md" \
+            >> "$RUNNER_TEMP/release-notes.md"
+
+          release_name="$(jq -r '.name // empty' "$RUNNER_TEMP/generated-release.json")"
+          if [[ -z "$release_name" ]]; then
+            release_name="$TAG"
+          fi
+
+          gh release create "$TAG" \
+            --title "$release_name" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"

@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache-dependency-path: |
+            app/go.sum
+            pdf-sidecar/go.sum
+
+      - name: Vet app
+        working-directory: app
+        run: go vet ./...
+
+      - name: Vet pdf-sidecar
+        working-directory: pdf-sidecar
+        run: go vet ./...
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+      - name: Install markdownlint
+        run: npm install -g markdownlint-cli2
+
+      - name: Run markdownlint
+        run: markdownlint-cli2
+
+  build:
+    name: Build
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache-dependency-path: |
+            app/go.sum
+            pdf-sidecar/go.sum
+
+      - name: Build app
+        working-directory: app
+        run: go build -v ./...
+
+      - name: Test app
+        working-directory: app
+        run: go test -v ./...
+
+      - name: Build pdf-sidecar
+        working-directory: pdf-sidecar
+        run: go build -v ./...
+
+      - name: Test pdf-sidecar
+        working-directory: pdf-sidecar
+        run: go test -v ./...
+
+  test:
+    name: Test
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Build Docker image
+        run: docker build -t file-api:${{ github.sha }} .
+
+      - name: Build PDF sidecar image
+        run: docker build -t file-api-pdf-sidecar:${{ github.sha }} ./pdf-sidecar
+
+      - name: Start container
+        run: |
+          docker run -d --name test-api \
+            -e JWT_SECRET="$(openssl rand -hex 32)" \
+            -e BASE_PATH=/tmp/files \
+            -p 8080:8080 \
+            file-api:${{ github.sha }}
+          sleep 5
+
+      - name: Start PDF sidecar container
+        run: |
+          docker run -d --name test-pdf-sidecar \
+            -p 8082:8080 \
+            file-api-pdf-sidecar:${{ github.sha }}
+          sleep 5
+
+      - name: Health check
+        run: |
+          curl -f http://localhost:8080/health
+          curl -f http://localhost:8082/health
+
+      - name: Stop containers
+        if: always()
+        run: docker stop test-api test-pdf-sidecar || true

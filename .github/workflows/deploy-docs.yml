@@ -1,0 +1,59 @@
+name: Deploy API Docs
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-docs:
+    name: Build Docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SWAGGER_UI_DIST_VERSION: "5.32.6"
+      SITE_DIR: tmp/docs-site
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+      - name: Install Swagger UI assets
+        run: npm install --ignore-scripts --no-save --no-package-lock swagger-ui-dist@${SWAGGER_UI_DIST_VERSION}
+
+      - name: Generate Swagger UI
+        run: |
+          set -euo pipefail
+          mkdir -p "$SITE_DIR"
+          cp docs/file-upload.yml "$SITE_DIR/file-upload.yml"
+          cp docs/swagger-ui.html "$SITE_DIR/index.html"
+          cp node_modules/swagger-ui-dist/swagger-ui.css "$SITE_DIR/swagger-ui.css"
+          cp node_modules/swagger-ui-dist/swagger-ui-bundle.js "$SITE_DIR/swagger-ui-bundle.js"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ./tmp/docs-site
+
+  deploy:
+    name: Deploy
+    needs: build-docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
