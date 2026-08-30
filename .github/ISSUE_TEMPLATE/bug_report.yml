@@ -1,0 +1,45 @@
+name: Bug report
+description: Something behaves incorrectly
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report security vulnerabilities here. Use [private reporting](https://github.com/cmiic/file-api/security/advisories/new) instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you observed, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The smallest sequence that reproduces it. Include the request, file type, or configuration involved.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Release tag or image digest you are running.
+      placeholder: v1.0.0 or ghcr.io/cmiic/file-api@sha256:...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Container runtime, host OS, and any relevant configuration or environment variables (redact secrets).
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant log output. Redact tokens, hostnames, and file contents.
+      render: text
+    validations:
+      required: false
