@@ -13,13 +13,13 @@ Open an [issue](https://github.com/cmiic/file-api/issues/new/choose) using one o
 ## Development
 
 ```bash
-(cd app && go vet ./... && go test ./...)
-(cd pdf-sidecar && go vet ./...)
+(cd app && go vet ./... && go test ./...)   # vet and unit tests
+(cd pdf-sidecar && go vet ./...)            # sidecar vet
+markdownlint-cli2                           # docs
 ```
 
-To run the whole stack locally, see the development section of the [README](README.md).
-
-Go vetting and the markdown linter run in CI.
+These are the same checks CI runs. To bring up the whole stack locally, see the
+development section of the [README](README.md).
 
 ## Making a change
 
