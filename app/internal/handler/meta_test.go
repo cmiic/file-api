@@ -99,6 +99,40 @@ func TestMetaHandlerRejectsEncodedTraversal(t *testing.T) {
 	}
 }
 
+// TestMetaHandlerContainsAbsolutePaths pins the containment property for
+// encoded absolute paths (%2f...), which sanitize to a leading "/" and
+// reach metadataPath as e.g. "/etc/passwd".
+//
+// These do not escape: Go's filepath.Join cleans the joined result, so
+// Join("/srv/meta", "/etc/passwd.json") is "/srv/meta/etc/passwd.json" -
+// still under the base. (os.path.join in Python would let the absolute
+// second argument win; filepath.Join does not.) The test exists so a
+// refactor away from filepath.Join cannot reintroduce an escape silently.
+func TestMetaHandlerContainsAbsolutePaths(t *testing.T) {
+	mux, base := newMetaTestServer(t)
+
+	targets := []string{
+		"/meta/files/%2fetc/passwd",
+		"/meta/files/%2f%2fetc/passwd",
+		// Aimed straight at the planted file by absolute path.
+		"/meta/files/" + strings.ReplaceAll(base+"/secret", "/", "%2f"),
+	}
+
+	for _, target := range targets {
+		req := authed(httptest.NewRequest(http.MethodGet, target, nil))
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+
+		if strings.Contains(rec.Body.String(), "TOPSECRET") {
+			t.Errorf("%s: absolute path escaped the meta directory (%d)", target, rec.Code)
+		}
+		if rec.Code == http.StatusOK {
+			t.Errorf("%s: expected the lookup to stay inside the meta directory and miss, got 200: %s",
+				target, rec.Body.String())
+		}
+	}
+}
+
 // TestMetaHandlerRedirectsLiteralTraversal documents the half the mux
 // already handled: an unencoded "../" never reaches the handler.
 func TestMetaHandlerRedirectsLiteralTraversal(t *testing.T) {

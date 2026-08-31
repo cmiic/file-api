@@ -68,6 +68,7 @@ func (n *Notifier) SendAlert(subject, body string) error {
 	}
 
 	addr := fmt.Sprintf("%s:%d", n.host, n.port)
+	safeSubject := headerStripper.Replace(subject)
 	msg := n.buildMessage(subject, body)
 
 	// Send without auth (internal mail gateway)
@@ -77,7 +78,9 @@ func (n *Notifier) SendAlert(subject, body string) error {
 		return fmt.Errorf("smtp send failed: %w", err)
 	}
 
-	log.Printf("Alert email sent: %s", subject)
+	// Log the stripped subject: CR/LF here would forge log lines just as
+	// it would forge headers.
+	log.Printf("Alert email sent: %s", safeSubject)
 	return nil
 }
 
