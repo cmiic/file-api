@@ -91,7 +91,7 @@ services:
         condition: service_healthy
 
   imgproxy:
-    image: docker.io/darthsim/imgproxy:latest@sha256:22eb18453beea1d24906d39bb9dca147cd6ee1ae6943b037377691721fd90d70
+    image: docker.io/darthsim/imgproxy:latest@sha256:debef46ed0bd364cdb2f96806e907eb14d114740f79712f882083192da7348e4
     read_only: true
     security_opt:
       - no-new-privileges:true
