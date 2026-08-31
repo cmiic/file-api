@@ -52,28 +52,23 @@ func (n *Notifier) Enabled() bool {
 	return n.enabled
 }
 
+// headerStripper removes the CR and LF bytes that would let a caller
+// close the Subject header and inject headers of its own.
+var headerStripper = strings.NewReplacer("\r", " ", "\n", " ")
+
 // SendAlert sends an email alert with the given subject and body.
 // Does nothing if notifications are disabled.
+//
+// The subject is stripped of CR/LF before it goes into the header block.
+// Today every caller passes a constant subject, so nothing can inject -
+// this keeps that true for callers that don't yet exist.
 func (n *Notifier) SendAlert(subject, body string) error {
 	if !n.enabled {
 		return nil
 	}
 
 	addr := fmt.Sprintf("%s:%d", n.host, n.port)
-
-	// Build email message
-	msg := fmt.Sprintf("From: %s\r\n"+
-		"To: %s\r\n"+
-		"Subject: %s\r\n"+
-		"MIME-Version: 1.0\r\n"+
-		"Content-Type: text/plain; charset=\"utf-8\"\r\n"+
-		"\r\n"+
-		"%s",
-		n.from,
-		strings.Join(n.recipients, ", "),
-		subject,
-		body,
-	)
+	msg := n.buildMessage(subject, body)
 
 	// Send without auth (internal mail gateway)
 	err := smtp.SendMail(addr, nil, n.from, n.recipients, []byte(msg))
@@ -84,6 +79,23 @@ func (n *Notifier) SendAlert(subject, body string) error {
 
 	log.Printf("Alert email sent: %s", subject)
 	return nil
+}
+
+// buildMessage assembles the RFC 5322 message. Split out from SendAlert
+// so the header construction is testable without an SMTP server.
+func (n *Notifier) buildMessage(subject, body string) string {
+	return fmt.Sprintf("From: %s\r\n"+
+		"To: %s\r\n"+
+		"Subject: %s\r\n"+
+		"MIME-Version: 1.0\r\n"+
+		"Content-Type: text/plain; charset=\"utf-8\"\r\n"+
+		"\r\n"+
+		"%s",
+		n.from,
+		strings.Join(n.recipients, ", "),
+		headerStripper.Replace(subject),
+		body,
+	)
 }
 
 // MalwareAlert sends an alert about a malware detection.
