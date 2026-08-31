@@ -29,8 +29,10 @@ API, and two scanners screen every upload asynchronously.
 
 All six services are designed to run on one host behind a reverse proxy that
 terminates TLS and applies caching, rate limiting, and upload limits. Only File
-API, imgproxy, and the PDF sidecar are ever reachable from that proxy; **the two
-scanners are unauthenticated and must stay on a private network.**
+API, imgproxy, and the PDF sidecar need to be reachable from that proxy, so
+`compose.dev.yaml` publishes ports for those three and reaches ClamAV and the
+two scanners over the Compose network only. Consult each scanner's own
+documentation before changing that.
 
 Production topology, TLS, digest pinning, host provisioning, upgrade and
 rollback procedures, and the database integration plugin are maintained
@@ -92,8 +94,8 @@ To iterate on the Go service alone, [.devcontainer](.devcontainer) builds the
 ### Tests
 
 ```bash
-cd app && go vet ./... && go test ./...
-cd pdf-sidecar && go vet ./...
+(cd app && go vet ./... && go test ./...)
+(cd pdf-sidecar && go vet ./...)
 ```
 
 ### Dependency image pinning
@@ -125,7 +127,7 @@ File API reads its configuration from the environment. `JWT_SECRET` (or
 | `SMTP_FROM` | `file-api@localhost` | Alert sender |
 | `ALERT_EMAILS` | empty | Comma-separated alert recipients |
 
-Moderation behaviour, on-disk scan metadata, the retry queue, and the metadata
+Moderation behavior, on-disk scan metadata, the retry queue, and the metadata
 endpoint are documented in
 [docs/moderation-integration.md](docs/moderation-integration.md).
 
