@@ -186,13 +186,13 @@ func (s *Service) scan(relativePath, absPath, clientCode, sha1 string, isPublic 
 	// would carry an empty hash and a locator matching every stored file.
 	if sha1 == "" {
 		if h, err := fileSHA1(absPath); err != nil {
-			log.Printf("Could not hash %s for alerting: %v", relativePath, err)
+			log.Printf("Could not hash %q for alerting: %v", relativePath, err)
 		} else {
 			sha1 = h
 		}
 	}
 
-	log.Printf("Starting scan for: %s", relativePath)
+	log.Printf("Starting scan for: %q", relativePath)
 
 	meta := &Metadata{
 		Status:      StatusPending,
@@ -206,7 +206,7 @@ func (s *Service) scan(relativePath, absPath, clientCode, sha1 string, isPublic 
 		result, err := s.scanner.ScanMalware(absPath)
 		if err != nil {
 			scanErr = fmt.Errorf("malware scan: %w", err)
-			log.Printf("Malware scan failed for %s: %v", relativePath, err)
+			log.Printf("Malware scan failed for %q: %v", relativePath, err)
 		} else if result != nil {
 			meta.MalwareResult = &MalwareInfo{
 				Infected:    result.Infected,
@@ -221,9 +221,9 @@ func (s *Service) scan(relativePath, absPath, clientCode, sha1 string, isPublic 
 
 				// Delete the file immediately
 				if err := s.deleteFile(relativePath); err != nil {
-					log.Printf("Failed to delete malware file %s: %v", relativePath, err)
+					log.Printf("Failed to delete malware file %q: %v", relativePath, err)
 				} else {
-					log.Printf("Deleted malware file: %s (%s)", relativePath, *result.MalwareName)
+					log.Printf("Deleted malware file: %q (%q)", relativePath, *result.MalwareName)
 				}
 
 				// Save metadata and notify
@@ -243,7 +243,7 @@ func (s *Service) scan(relativePath, absPath, clientCode, sha1 string, isPublic 
 		result, err := s.scanner.ScanNSFW(absPath)
 		if err != nil {
 			scanErr = fmt.Errorf("nsfw scan: %w", err)
-			log.Printf("NSFW scan failed for %s: %v", relativePath, err)
+			log.Printf("NSFW scan failed for %q: %v", relativePath, err)
 		} else if result != nil {
 			meta.NSFWResult = &NSFWInfo{
 				Unsafe:          result.Unsafe,
@@ -257,7 +257,7 @@ func (s *Service) scan(relativePath, absPath, clientCode, sha1 string, isPublic 
 				meta.CompletedAt = &now
 
 				// Don't delete, just flag
-				log.Printf("NSFW content flagged: %s (confidence: %.2f)", relativePath, result.Confidence)
+				log.Printf("NSFW content flagged: %q (confidence: %.2f)", relativePath, result.Confidence)
 
 				s.saveMetadata(relativePath, meta)
 				s.notifier.NSFWAlert(sha1, scopeOf(isPublic), result.Confidence, result.DetectedClasses)
@@ -281,7 +281,7 @@ func (s *Service) scan(relativePath, absPath, clientCode, sha1 string, isPublic 
 	now := time.Now()
 	meta.CompletedAt = &now
 	s.saveMetadata(relativePath, meta)
-	log.Printf("Scan complete (clean): %s", relativePath)
+	log.Printf("Scan complete (clean): %q", relativePath)
 }
 
 // GetMetadata reads the metadata for a file.
@@ -359,7 +359,7 @@ func (s *Service) queueForRetry(relativePath, absPath, clientCode, sha1 string, 
 	data, _ := json.MarshalIndent(entry, "", "  ")
 	os.WriteFile(queueFile, data, 0644)
 
-	log.Printf("Queued for retry: %s (attempt %d)", relativePath, entry.Retries+1)
+	log.Printf("Queued for retry: %q (attempt %d)", relativePath, entry.Retries+1)
 }
 
 // processQueue runs in the background and retries failed scans.
