@@ -118,6 +118,9 @@ func TestIsValidClientCode(t *testing.T) {
 		{"space not allowed", "MY CLIENT", false},
 		{"slash not allowed", "MY/CLIENT", false},
 		{"dot not allowed", "MY.CLIENT", false},
+		{"traversal not allowed", "..", false},
+		{"traversal segment not allowed", "../etc", false},
+		{"newline not allowed", "ACME\nX", false},
 	}
 
 	for _, tt := range tests {

@@ -92,8 +92,17 @@ func IsValidFilename(filename string) bool {
 }
 
 // IsValidClientCode checks if a client code matches the allowed pattern.
+//
+// The length and emptiness checks are early returns rather than terms of
+// one boolean expression so the anchored regexp match is the function's
+// tail return - the shape IsValidFilename and IsValidRelativePath already
+// have, and the shape static analysis recognizes as a validation barrier.
+// Behaviour is unchanged.
 func IsValidClientCode(code string) bool {
-	return code != "" && len(code) <= 16 && validClientCode.MatchString(code)
+	if code == "" || len(code) > 16 {
+		return false
+	}
+	return validClientCode.MatchString(code)
 }
 
 // IsValidRelativePath checks if a relative path is safe.
