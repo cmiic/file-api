@@ -118,25 +118,34 @@ func (n *Notifier) buildMessage(subject, body string) string {
 // Alerts identify a file by its content hash, never by its path.
 //
 // The stored path embeds the uploader's own filename - sanitised, but still
-// theirs - and these alerts go to operators. For a cli/ upload that filename
-// can carry client information the operator has no business receiving, so it
-// stays out of the message. The SHA1 is derived from content rather than
-// supplied by anyone, and locates the file well enough to act on.
+// theirs - and these alerts go to whoever is on ALERT_EMAILS. A filename can
+// carry information that has no business in an operator mailbox, so it stays
+// out of the message. The SHA1 is derived from content rather than supplied by
+// anyone, and locates the file well enough to act on.
+//
+// Scope is reported alongside it, and is currently always "public": moderation
+// only scans public uploads (ProcessUpload returns early when !isPublic), so a
+// private cli/ upload never reaches an alert today. The distinction is carried
+// anyway because it costs a bool, and because the day private scanning is
+// switched on is not the day to rediscover that alerts name client files.
 //
 // It is not a unique locator, and the message says so. StoreFile deduplicates
 // on the whole final path, which includes the uploader's base name, so the
 // same bytes stored under two names are two files sharing one hash - see
 // TestDedupIsPerPathNotPerDigest. That is worth stating rather than hiding:
-// every match is byte-identical to the file the alert is about, so for a
-// malware alert the extra hits are the same malicious content under other
-// names and want handling too.
+// for a malware alert the extra hits are the same content under other names
+// and want handling too.
+//
+// The message says matches share a SHA1, not that they are byte-identical.
+// SHA1 collisions are constructible, and a malware alert is exactly the
+// context where claiming more than the digest supports would be wrong.
 const locateHint = "Locate it by hash:\n" +
-	"  find $BASE_PATH -name '*%s*'\n\n" +
+	"  find \"$BASE_PATH\" -type f -name '*%s*'\n\n" +
 	"The filename is omitted deliberately: it comes from the uploader and may\n" +
-	"carry client information. The hash is not unique per path - identical\n" +
-	"bytes stored under different names are separate files sharing it - so the\n" +
-	"command may match more than one. Every match is byte-identical to the\n" +
-	"file this alert is about.\n"
+	"carry information that does not belong in an operator mailbox. The hash is\n" +
+	"not unique per path - identical bytes stored under different names are\n" +
+	"separate files sharing it - so the command may match more than one. Every\n" +
+	"match has the same SHA1 as the file this alert is about.\n"
 
 // noHashHint replaces the locator when the hash is missing. An empty hash
 // would render the find pattern as '**', which matches every stored file -

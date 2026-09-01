@@ -251,10 +251,13 @@ func TestSendAlertBodyCannotSmuggleSMTPCommands(t *testing.T) {
 // rather than the stored relative path.
 //
 // The path embeds the uploader's own filename. It is sanitised, but it is
-// still theirs, and for a cli/ upload it can carry client information the
-// operator receiving this mail has no business seeing. The hash locates the
-// file just as well - it is what deduplication keys on - and is derived from
-// content rather than supplied by anyone.
+// still theirs, and it can carry information that has no business in an
+// operator mailbox. The hash locates the file well enough to act on and is
+// derived from content rather than supplied by anyone.
+//
+// It is not a unique locator - StoreFile deduplicates on the whole final path,
+// so the same bytes under two names are two files sharing one hash. See
+// storage.TestDedupIsPerPathNotPerDigest; the alert body says as much.
 func TestAlertsIdentifyFilesByHashNotName(t *testing.T) {
 	alerts := map[string]func(n *Notifier){
 		"malware":    func(n *Notifier) { n.MalwareAlert(testSHA1, "private (client upload)", "Trojan.Test") },
