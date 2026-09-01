@@ -155,43 +155,16 @@ func IsValidURL(rawURL string) bool {
 		return false
 	}
 
-	// Parse as IP and check if private
+	// Literal addresses are classified by BlockedIP, the same function the dial
+	// guard uses, so this pre-filter and the boundary cannot drift apart. A
+	// hostname is left alone here: only the dial can know where it points.
 	if ip := net.ParseIP(host); ip != nil {
-		if isPrivateIP(ip) {
+		if BlockedIP(ip) {
 			return false
 		}
 	}
 
 	return true
-}
-
-// isPrivateIP checks if an IP is private, loopback, link-local, or otherwise internal.
-func isPrivateIP(ip net.IP) bool {
-	// Loopback (127.x.x.x, ::1)
-	if ip.IsLoopback() {
-		return true
-	}
-
-	// Link-local (169.254.x.x, fe80::)
-	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-		return true
-	}
-
-	// Private ranges (10.x, 172.16-31.x, 192.168.x, fc00::/7)
-	if ip.IsPrivate() {
-		return true
-	}
-
-	// Cloud metadata endpoints (169.254.169.254 is covered by link-local)
-	// Also block 100.64.0.0/10 (Carrier-grade NAT)
-	if ip4 := ip.To4(); ip4 != nil {
-		// 100.64.0.0/10 - CGNAT
-		if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
-			return true
-		}
-	}
-
-	return false
 }
 
 // ExtractExtension returns the lowercase file extension without the dot.
