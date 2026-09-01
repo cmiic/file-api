@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -36,13 +37,32 @@ func NewFetchHandler(s *storage.Storage, maxUploadSize int64, jwtSecret string) 
 		jwtSecret:     []byte(jwtSecret),
 	}
 
+	// The SSRF boundary is the dial guard, not the URL string checks. It runs
+	// after name resolution on every hop, so it sees the address actually being
+	// connected to - which is the only thing a hostname, an unusual IP spelling
+	// or a rebinding DNS answer cannot lie about. Cloned from DefaultTransport
+	// so proxy support, HTTP/2 and connection pooling are unchanged; only the
+	// dialer differs.
+	//
+	// One caveat worth knowing: if an egress proxy is ever configured via
+	// HTTP_PROXY, every request dials the proxy instead of the target, and the
+	// guard then validates the proxy address. The proxy becomes the boundary.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = (&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control:   util.SafeDialControl,
+	}).DialContext
+
 	h.httpClient = &http.Client{
-		Timeout: 30 * time.Second,
+		Timeout:   30 * time.Second,
+		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {
 				return fmt.Errorf("too many redirects")
 			}
-			// Re-validate redirect destination to prevent SSRF via open redirect
+			// Cheap pre-filter on the redirect target. The dial guard is what
+			// actually enforces it; this keeps the failure legible.
 			if !util.IsValidURL(req.URL.String()) {
 				return fmt.Errorf("redirect to disallowed URL: %s", req.URL.Host)
 			}

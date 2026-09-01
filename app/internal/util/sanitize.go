@@ -117,8 +117,13 @@ func IsValidRelativePath(path string) bool {
 	return validRelativePath.MatchString(path)
 }
 
-// IsValidURL checks if a URL is valid and safe for fetching.
-// Only allows http/https schemes and blocks private/internal IPs.
+// IsValidURL is a cheap pre-filter for caller-supplied fetch URLs: http or
+// https scheme, a host, and no literal internal address.
+//
+// It is NOT the SSRF boundary - SafeDialControl is. A string check cannot see
+// where a name resolves, so a hostname pointing at an internal address passes
+// here by design. Keep it for fast, legible rejection of obvious junk; rely on
+// the dial guard for the actual guarantee.
 func IsValidURL(rawURL string) bool {
 	if rawURL == "" {
 		return false
@@ -139,8 +144,11 @@ func IsValidURL(rawURL string) bool {
 		return false
 	}
 
-	// Extract hostname (without port)
-	host := parsed.Hostname()
+	// Extract hostname (without port), normalised. DNS names are
+	// case-insensitive and may carry a root-label trailing dot, so compare
+	// against the normalised form: "LOCALHOST" and "localhost." both resolve
+	// to loopback and both used to pass this check.
+	host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
 
 	// Block localhost variants
 	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
