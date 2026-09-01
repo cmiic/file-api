@@ -41,13 +41,18 @@ func NewFetchHandler(s *storage.Storage, maxUploadSize int64, jwtSecret string) 
 	// after name resolution on every hop, so it sees the address actually being
 	// connected to - which is the only thing a hostname, an unusual IP spelling
 	// or a rebinding DNS answer cannot lie about. Cloned from DefaultTransport
-	// so proxy support, HTTP/2 and connection pooling are unchanged; only the
-	// dialer differs.
+	// so HTTP/2, connection pooling and its timeouts are unchanged.
 	//
-	// One caveat worth knowing: if an egress proxy is ever configured via
-	// HTTP_PROXY, every request dials the proxy instead of the target, and the
-	// guard then validates the proxy address. The proxy becomes the boundary.
+	// Proxying is disabled deliberately. DefaultTransport honours HTTP_PROXY
+	// and HTTPS_PROXY, and with a proxy in play every request dials the proxy
+	// instead of the target: the guard would approve the proxy's public address
+	// while the proxy went on to resolve and connect to whatever the caller
+	// asked for. That is the whole bypass back again, switched on by an
+	// environment variable. Nothing here needs an egress proxy, so the guard
+	// stays the boundary unconditionally. If one is ever required, the
+	// destination filtering has to move to the proxy - it cannot be done here.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
 	transport.DialContext = (&net.Dialer{
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
