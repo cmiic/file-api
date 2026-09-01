@@ -43,6 +43,17 @@ func (s *Storage) StoreFile(r io.Reader, originalFilename, clientCode string) (*
 		return nil, fmt.Errorf("invalid filename after sanitization")
 	}
 
+	// Validate the client code here, where it becomes a path component,
+	// rather than trusting whoever called us to have done it. Both current
+	// callers do, but this function is exported and nothing in its signature
+	// says the argument has to be safe.
+	if strings.Contains(clientCode, "..") {
+		return nil, fmt.Errorf("invalid client code")
+	}
+	if clientCode != "" && !util.IsValidClientCode(clientCode) {
+		return nil, fmt.Errorf("invalid client code")
+	}
+
 	// Extract base name and extension
 	baseName := util.ExtractBaseName(sanitized)
 	ext := util.ExtractExtension(sanitized)
