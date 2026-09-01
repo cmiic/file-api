@@ -117,8 +117,13 @@ func IsValidRelativePath(path string) bool {
 	return validRelativePath.MatchString(path)
 }
 
-// IsValidURL checks if a URL is valid and safe for fetching.
-// Only allows http/https schemes and blocks private/internal IPs.
+// IsValidURL is a cheap pre-filter for caller-supplied fetch URLs: http or
+// https scheme, a host, and no literal internal address.
+//
+// It is NOT the SSRF boundary - SafeDialControl is. A string check cannot see
+// where a name resolves, so a hostname pointing at an internal address passes
+// here by design. Keep it for fast, legible rejection of obvious junk; rely on
+// the dial guard for the actual guarantee.
 func IsValidURL(rawURL string) bool {
 	if rawURL == "" {
 		return false
@@ -139,51 +144,27 @@ func IsValidURL(rawURL string) bool {
 		return false
 	}
 
-	// Extract hostname (without port)
-	host := parsed.Hostname()
+	// Extract hostname (without port), normalised. DNS names are
+	// case-insensitive and may carry a root-label trailing dot, so compare
+	// against the normalised form: "LOCALHOST" and "localhost." both resolve
+	// to loopback and both used to pass this check.
+	host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
 
 	// Block localhost variants
 	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
 		return false
 	}
 
-	// Parse as IP and check if private
+	// Literal addresses are classified by BlockedIP, the same function the dial
+	// guard uses, so this pre-filter and the boundary cannot drift apart. A
+	// hostname is left alone here: only the dial can know where it points.
 	if ip := net.ParseIP(host); ip != nil {
-		if isPrivateIP(ip) {
+		if BlockedIP(ip) {
 			return false
 		}
 	}
 
 	return true
-}
-
-// isPrivateIP checks if an IP is private, loopback, link-local, or otherwise internal.
-func isPrivateIP(ip net.IP) bool {
-	// Loopback (127.x.x.x, ::1)
-	if ip.IsLoopback() {
-		return true
-	}
-
-	// Link-local (169.254.x.x, fe80::)
-	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-		return true
-	}
-
-	// Private ranges (10.x, 172.16-31.x, 192.168.x, fc00::/7)
-	if ip.IsPrivate() {
-		return true
-	}
-
-	// Cloud metadata endpoints (169.254.169.254 is covered by link-local)
-	// Also block 100.64.0.0/10 (Carrier-grade NAT)
-	if ip4 := ip.To4(); ip4 != nil {
-		// 100.64.0.0/10 - CGNAT
-		if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
-			return true
-		}
-	}
-
-	return false
 }
 
 // ExtractExtension returns the lowercase file extension without the dot.
