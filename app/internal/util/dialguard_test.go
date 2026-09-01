@@ -17,6 +17,28 @@ func TestBlockedIP(t *testing.T) {
 		"224.0.0.1", "ff02::1",
 		"100.64.0.1", "100.127.255.255",
 		"::ffff:127.0.0.1", "::ffff:169.254.169.254", "::ffff:10.0.0.1",
+
+		// Special-purpose ranges that none of net.IP's predicates report.
+		// A deployment routing any of these internally would otherwise have
+		// them dialled.
+		"0.1.2.3",         // 0.0.0.0/8, "this network"
+		"192.0.0.1",       // IETF protocol assignments
+		"192.0.2.1",       // TEST-NET-1
+		"198.51.100.1",    // TEST-NET-2
+		"203.0.113.1",     // TEST-NET-3
+		"192.88.99.1",     // 6to4 relay anycast
+		"198.18.0.1",      // benchmarking, RFC 2544
+		"198.19.255.255",  // benchmarking, upper end
+		"240.0.0.1",       // reserved
+		"255.255.255.255", // broadcast
+		"2001:db8::1",     // documentation
+		"100::1",          // discard-only
+
+		// IPv4 embedded in IPv6: net.IP's predicates do not look inside, so
+		// these are loopback and private wearing a different spelling.
+		"64:ff9b::7f00:1", // NAT64 for 127.0.0.1
+		"2002:7f00:1::",   // 6to4 for 127.0.0.1
+		"2002:c0a8:101::", // 6to4 for 192.168.1.1
 	}
 	for _, s := range blocked {
 		ip := net.ParseIP(s)
@@ -32,7 +54,9 @@ func TestBlockedIP(t *testing.T) {
 		"8.8.8.8", "1.1.1.1", "93.184.216.34",
 		"172.15.255.255", "172.32.0.1",
 		"100.63.255.255", "100.128.0.1",
+		"198.17.255.255", "198.20.0.0", // either side of the benchmarking range
 		"2606:4700:4700::1111",
+		"::ffff:8.8.8.8", // IPv4-mapped public address must stay reachable
 	}
 	for _, s := range allowed {
 		ip := net.ParseIP(s)
