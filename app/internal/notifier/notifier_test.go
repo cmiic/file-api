@@ -280,6 +280,27 @@ func TestAlertsIdentifyFilesByHashNotName(t *testing.T) {
 	}
 }
 
+// TestAlertWithNoHashEmitsNoWildcardLocator covers the case where a scan job
+// carries no hash - a queue entry written before alerts identified files that
+// way. Rendering the locator anyway would produce "find -name '**'", which
+// matches every stored file: a locator pointing at everything is worse than
+// none, because an operator may act on it.
+func TestAlertWithNoHashEmitsNoWildcardLocator(t *testing.T) {
+	raw, _ := captureSMTP(t, func(n *Notifier) {
+		n.MalwareAlert("", "public", "Trojan.Test")
+	})
+
+	if strings.Contains(raw, "'**'") || strings.Contains(raw, "-name '*'") {
+		t.Errorf("alert offered a locator matching every file:\n%s", raw)
+	}
+	if !strings.Contains(raw, "(unavailable)") {
+		t.Errorf("expected the missing hash to be named explicitly:\n%s", raw)
+	}
+	if !strings.Contains(raw, "no locator") {
+		t.Errorf("expected the body to say no locator can be given:\n%s", raw)
+	}
+}
+
 func TestSendAlertDisabledIsNoOp(t *testing.T) {
 	n := &Notifier{enabled: false}
 	if err := n.SendAlert("subject", "body"); err != nil {

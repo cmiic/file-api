@@ -138,6 +138,29 @@ const locateHint = "Locate it by hash:\n" +
 	"command may match more than one. Every match is byte-identical to the\n" +
 	"file this alert is about.\n"
 
+// noHashHint replaces the locator when the hash is missing. An empty hash
+// would render the find pattern as '**', which matches every stored file -
+// a locator pointing at everything is worse than none, because an operator
+// may act on it.
+const noHashHint = "No content hash was available for this file, so no locator\n" +
+	"can be given. The scan metadata under SCAN_META_PATH records the path.\n"
+
+// fileLocator renders the "how to find it" half of an alert body.
+func fileLocator(sha1 string) string {
+	if sha1 == "" {
+		return noHashHint
+	}
+	return fmt.Sprintf(locateHint, sha1)
+}
+
+// hashOrUnknown keeps an empty hash from being displayed as a blank field.
+func hashOrUnknown(sha1 string) string {
+	if sha1 == "" {
+		return "(unavailable)"
+	}
+	return sha1
+}
+
 // MalwareAlert sends an alert about a malware detection.
 func (n *Notifier) MalwareAlert(sha1, scope, malwareName string) error {
 	subject := "[file-api] Malware detected and removed"
@@ -146,11 +169,11 @@ func (n *Notifier) MalwareAlert(sha1, scope, malwareName string) error {
 		"Scope: %s\n"+
 		"Malware: %s\n"+
 		"Action: File deleted, metadata preserved\n\n"+
-		locateHint,
-		sha1,
+		"%s",
+		hashOrUnknown(sha1),
 		scope,
 		malwareName,
-		sha1,
+		fileLocator(sha1),
 	)
 	return n.SendAlert(subject, body)
 }
@@ -164,12 +187,12 @@ func (n *Notifier) NSFWAlert(sha1, scope string, confidence float64, classes []s
 		"Confidence: %.2f\n"+
 		"Classes: %s\n"+
 		"Action: File flagged for review\n\n"+
-		locateHint,
-		sha1,
+		"%s",
+		hashOrUnknown(sha1),
 		scope,
 		confidence,
 		strings.Join(classes, ", "),
-		sha1,
+		fileLocator(sha1),
 	)
 	return n.SendAlert(subject, body)
 }
@@ -183,12 +206,12 @@ func (n *Notifier) ScanErrorAlert(sha1, scope, scanType, errorMsg string) error 
 		"Scan type: %s\n"+
 		"Error: %s\n"+
 		"Action: Queued for retry\n\n"+
-		locateHint,
-		sha1,
+		"%s",
+		hashOrUnknown(sha1),
 		scope,
 		scanType,
 		errorMsg,
-		sha1,
+		fileLocator(sha1),
 	)
 	return n.SendAlert(subject, body)
 }

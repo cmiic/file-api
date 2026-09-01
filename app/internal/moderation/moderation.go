@@ -2,8 +2,11 @@
 package moderation
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -60,6 +63,29 @@ type QueueEntry struct {
 	QueuedAt     time.Time `json:"queued_at"`
 	Retries      int       `json:"retries"`
 	LastError    string    `json:"last_error,omitempty"`
+}
+
+// fileSHA1 hashes the stored file. Used when a scan job carries no hash of its
+// own, which is the case for queue entries written before alerts identified
+// files by hash: their JSON has no sha1 field, so it unmarshals empty.
+//
+// Recomputed from content rather than parsed out of the stored filename. The
+// filename would be the cheaper source - it ends in "-{sha1}.{ext}" - but it
+// is the uploader's, and pulling the hash back out of it would put that value
+// on the path to the alert again, which is the whole thing this indirection
+// exists to avoid.
+func fileSHA1(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha1.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // scopeOf renders the public/private distinction for an operator alert. It is
@@ -154,6 +180,17 @@ func (s *Service) scan(relativePath, absPath, clientCode, sha1 string, isPublic 
 		delete(s.processing, relativePath)
 		s.mu.Unlock()
 	}()
+
+	// A job queued before alerts carried hashes has none. Recompute it now, so
+	// an alert raised on retry can still name the file. Without this the alert
+	// would carry an empty hash and a locator matching every stored file.
+	if sha1 == "" {
+		if h, err := fileSHA1(absPath); err != nil {
+			log.Printf("Could not hash %s for alerting: %v", relativePath, err)
+		} else {
+			sha1 = h
+		}
+	}
 
 	log.Printf("Starting scan for: %s", relativePath)
 
