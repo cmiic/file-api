@@ -18,6 +18,10 @@ type FileInfo struct {
 	RelativePath string // Path relative to base (e.g., "2026/1/photo-{sha1}.jpg")
 	Size         int64  // File size in bytes
 	IsDuplicate  bool   // True if file already existed (deduplication)
+	// SHA1 of the stored content, hex encoded. Identifies the file without
+	// naming it: the relative path embeds the uploader's own filename, which
+	// is not something every consumer should receive.
+	SHA1 string
 }
 
 // Storage handles file operations.
@@ -108,6 +112,7 @@ func (s *Storage) StoreFile(r io.Reader, originalFilename, clientCode string) (*
 			RelativePath: GenerateRelativePath(clientCode, finalName),
 			Size:         size,
 			IsDuplicate:  true,
+			SHA1:         sha1Hex,
 		}, nil
 	}
 
@@ -121,6 +126,7 @@ func (s *Storage) StoreFile(r io.Reader, originalFilename, clientCode string) (*
 		RelativePath: GenerateRelativePath(clientCode, finalName),
 		Size:         size,
 		IsDuplicate:  false,
+		SHA1:         sha1Hex,
 	}, nil
 }
 

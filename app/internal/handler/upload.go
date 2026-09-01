@@ -164,7 +164,7 @@ func (h *UploadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Trigger async moderation scan for public uploads
 	isPublic := clientCode == ""
 	if h.moderation != nil {
-		h.moderation.ProcessUpload(info.RelativePath, absPath, clientCode, isPublic)
+		h.moderation.ProcessUpload(info.RelativePath, absPath, clientCode, info.SHA1, isPublic)
 	}
 
 	// Build response

@@ -55,10 +55,21 @@ type QueueEntry struct {
 	RelativePath string    `json:"relative_path"`
 	AbsolutePath string    `json:"abs_path"`
 	ClientCode   string    `json:"client_code"`
+	SHA1         string    `json:"sha1,omitempty"`
 	IsPublic     bool      `json:"is_public"`
 	QueuedAt     time.Time `json:"queued_at"`
 	Retries      int       `json:"retries"`
 	LastError    string    `json:"last_error,omitempty"`
+}
+
+// scopeOf renders the public/private distinction for an operator alert. It is
+// derived from a bool rather than from any request value, so it carries no
+// uploader-supplied text into the message.
+func scopeOf(isPublic bool) string {
+	if isPublic {
+		return "public"
+	}
+	return "private (client upload)"
 }
 
 // DeleteFunc is a function type for deleting files.
@@ -114,7 +125,7 @@ func (s *Service) Enabled() bool {
 
 // ProcessUpload triggers async scanning for a newly uploaded file.
 // This is non-blocking and runs in a goroutine.
-func (s *Service) ProcessUpload(relativePath, absPath, clientCode string, isPublic bool) {
+func (s *Service) ProcessUpload(relativePath, absPath, clientCode, sha1 string, isPublic bool) {
 	if !s.Enabled() {
 		return
 	}
@@ -124,11 +135,11 @@ func (s *Service) ProcessUpload(relativePath, absPath, clientCode string, isPubl
 		return
 	}
 
-	go s.scan(relativePath, absPath, clientCode, isPublic)
+	go s.scan(relativePath, absPath, clientCode, sha1, isPublic)
 }
 
 // scan performs the actual scanning (called async).
-func (s *Service) scan(relativePath, absPath, clientCode string, isPublic bool) {
+func (s *Service) scan(relativePath, absPath, clientCode, sha1 string, isPublic bool) {
 	// Prevent duplicate processing
 	s.mu.Lock()
 	if s.processing[relativePath] {
@@ -184,7 +195,7 @@ func (s *Service) scan(relativePath, absPath, clientCode string, isPublic bool) 
 				if result.MalwareName != nil {
 					malwareName = *result.MalwareName
 				}
-				s.notifier.MalwareAlert(relativePath, malwareName)
+				s.notifier.MalwareAlert(sha1, scopeOf(isPublic), malwareName)
 				return // Don't continue with NSFW scan
 			}
 		}
@@ -212,7 +223,7 @@ func (s *Service) scan(relativePath, absPath, clientCode string, isPublic bool) 
 				log.Printf("NSFW content flagged: %s (confidence: %.2f)", relativePath, result.Confidence)
 
 				s.saveMetadata(relativePath, meta)
-				s.notifier.NSFWAlert(relativePath, result.Confidence, result.DetectedClasses)
+				s.notifier.NSFWAlert(sha1, scopeOf(isPublic), result.Confidence, result.DetectedClasses)
 				return
 			}
 		}
@@ -224,7 +235,7 @@ func (s *Service) scan(relativePath, absPath, clientCode string, isPublic bool) 
 		meta.Status = StatusError
 		meta.Error = &errStr
 		s.saveMetadata(relativePath, meta)
-		s.queueForRetry(relativePath, absPath, clientCode, isPublic, errStr)
+		s.queueForRetry(relativePath, absPath, clientCode, sha1, isPublic, errStr)
 		return
 	}
 
@@ -285,11 +296,12 @@ func (s *Service) metadataPath(relativePath string) string {
 }
 
 // queueForRetry adds a failed scan to the retry queue.
-func (s *Service) queueForRetry(relativePath, absPath, clientCode string, isPublic bool, lastError string) {
+func (s *Service) queueForRetry(relativePath, absPath, clientCode, sha1 string, isPublic bool, lastError string) {
 	entry := QueueEntry{
 		RelativePath: relativePath,
 		AbsolutePath: absPath,
 		ClientCode:   clientCode,
+		SHA1:         sha1,
 		IsPublic:     isPublic,
 		QueuedAt:     time.Now(),
 		Retries:      0,
@@ -370,6 +382,6 @@ func (s *Service) processQueueOnce() {
 		os.Remove(queueFile)
 
 		// Retry scan
-		s.scan(qe.RelativePath, qe.AbsolutePath, qe.ClientCode, qe.IsPublic)
+		s.scan(qe.RelativePath, qe.AbsolutePath, qe.ClientCode, qe.SHA1, qe.IsPublic)
 	}
 }

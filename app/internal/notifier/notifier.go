@@ -115,45 +115,70 @@ func (n *Notifier) buildMessage(subject, body string) string {
 	)
 }
 
+// Alerts identify a file by its content hash, never by its path.
+//
+// The stored path embeds the uploader's own filename - sanitised, but still
+// theirs - and these alerts go to operators. For a cli/ upload that filename
+// can carry client information the operator has no business receiving, so it
+// stays out of the message. The SHA1 locates the file just as well, is unique
+// per stored file because it is what deduplication keys on, and is derived
+// from content rather than supplied by anyone.
+const locateHint = "Locate it by hash:\n" +
+	"  find $BASE_PATH -name '*%s*'\n\n" +
+	"The filename is omitted deliberately: it comes from the uploader and may\n" +
+	"carry client information.\n"
+
 // MalwareAlert sends an alert about a malware detection.
-func (n *Notifier) MalwareAlert(relativePath, malwareName string) error {
+func (n *Notifier) MalwareAlert(sha1, scope, malwareName string) error {
 	subject := "[file-api] Malware detected and removed"
 	body := fmt.Sprintf("Malware detected in uploaded file.\n\n"+
-		"File: %s\n"+
+		"SHA1: %s\n"+
+		"Scope: %s\n"+
 		"Malware: %s\n"+
-		"Action: File deleted, metadata preserved\n",
-		relativePath,
+		"Action: File deleted, metadata preserved\n\n"+
+		locateHint,
+		sha1,
+		scope,
 		malwareName,
+		sha1,
 	)
 	return n.SendAlert(subject, body)
 }
 
 // NSFWAlert sends an alert about NSFW content detection.
-func (n *Notifier) NSFWAlert(relativePath string, confidence float64, classes []string) error {
+func (n *Notifier) NSFWAlert(sha1, scope string, confidence float64, classes []string) error {
 	subject := "[file-api] NSFW content detected"
 	body := fmt.Sprintf("NSFW content detected in uploaded file.\n\n"+
-		"File: %s\n"+
+		"SHA1: %s\n"+
+		"Scope: %s\n"+
 		"Confidence: %.2f\n"+
 		"Classes: %s\n"+
-		"Action: File flagged for review\n",
-		relativePath,
+		"Action: File flagged for review\n\n"+
+		locateHint,
+		sha1,
+		scope,
 		confidence,
 		strings.Join(classes, ", "),
+		sha1,
 	)
 	return n.SendAlert(subject, body)
 }
 
 // ScanErrorAlert sends an alert about a scan failure.
-func (n *Notifier) ScanErrorAlert(relativePath, scanType, errorMsg string) error {
+func (n *Notifier) ScanErrorAlert(sha1, scope, scanType, errorMsg string) error {
 	subject := fmt.Sprintf("[file-api] %s scan failed", scanType)
 	body := fmt.Sprintf("Scan failed for uploaded file.\n\n"+
-		"File: %s\n"+
+		"SHA1: %s\n"+
+		"Scope: %s\n"+
 		"Scan type: %s\n"+
 		"Error: %s\n"+
-		"Action: Queued for retry\n",
-		relativePath,
+		"Action: Queued for retry\n\n"+
+		locateHint,
+		sha1,
+		scope,
 		scanType,
 		errorMsg,
+		sha1,
 	)
 	return n.SendAlert(subject, body)
 }
