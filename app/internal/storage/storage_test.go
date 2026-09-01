@@ -46,8 +46,11 @@ func TestStoreFileAcceptsValidClientCode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StoreFile: %v", err)
 	}
-	if !strings.HasPrefix(info.RelativePath, filepath.Join("cli", "ACME")) {
-		t.Errorf("expected a cli/ACME prefix, got %q", info.RelativePath)
+	// Compare on a slash-normalised path with a trailing separator, so this
+	// asserts a whole path segment: a bare "cli/ACME" prefix would also accept
+	// "cli/ACMEX/...".
+	if !strings.HasPrefix(filepath.ToSlash(info.RelativePath), "cli/ACME/") {
+		t.Errorf("expected a cli/ACME/ prefix, got %q", info.RelativePath)
 	}
 	if !s.FileExists(info.RelativePath) {
 		t.Errorf("stored file not found at %q", info.RelativePath)
@@ -58,11 +61,15 @@ func TestStoreFileAcceptsValidClientCode(t *testing.T) {
 func TestStoreFileAllowsEmptyClientCode(t *testing.T) {
 	s := NewStorage(t.TempDir(), 60)
 
-	info, err := s.StoreFile(strings.NewReader("payload"), "photo.jpg", "")
+	// The filename deliberately contains "cli" - a substring check would call
+	// this a private upload.
+	info, err := s.StoreFile(strings.NewReader("payload"), "client-photo.jpg", "")
 	if err != nil {
 		t.Fatalf("StoreFile: %v", err)
 	}
-	if strings.Contains(info.RelativePath, "cli") {
+	// A prefix check, not a substring one: "cli" can legitimately occur inside
+	// a filename, and that must not fail this test.
+	if strings.HasPrefix(filepath.ToSlash(info.RelativePath), "cli/") {
 		t.Errorf("public upload should not land under cli/, got %q", info.RelativePath)
 	}
 }
