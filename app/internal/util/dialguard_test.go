@@ -36,9 +36,14 @@ func TestBlockedIP(t *testing.T) {
 
 		// IPv4 embedded in IPv6: net.IP's predicates do not look inside, so
 		// these are loopback and private wearing a different spelling.
-		"64:ff9b::7f00:1", // NAT64 for 127.0.0.1
-		"2002:7f00:1::",   // 6to4 for 127.0.0.1
-		"2002:c0a8:101::", // 6to4 for 192.168.1.1
+		"64:ff9b::7f00:1",   // NAT64 for 127.0.0.1
+		"2002:7f00:1::",     // 6to4 for 127.0.0.1
+		"2002:c0a8:101::",   // 6to4 for 192.168.1.1
+		"64:ff9b:1::7f00:1", // NAT64 local-use prefix, RFC 8215
+		"2001::1",           // Teredo, embeds IPv4
+		"2001:2::1",         // IETF benchmarking
+		"3fff::1",           // documentation, RFC 9637
+		"5f00::1",           // SRv6 segment identifiers
 	}
 	for _, s := range blocked {
 		ip := net.ParseIP(s)
@@ -56,7 +61,8 @@ func TestBlockedIP(t *testing.T) {
 		"100.63.255.255", "100.128.0.1",
 		"198.17.255.255", "198.20.0.0", // either side of the benchmarking range
 		"2606:4700:4700::1111",
-		"::ffff:8.8.8.8", // IPv4-mapped public address must stay reachable
+		"2001:4860:4860::8888", // Google DNS - just outside 2001::/23, must stay allowed
+		"::ffff:8.8.8.8",       // IPv4-mapped public address must stay reachable
 	}
 	for _, s := range allowed {
 		ip := net.ParseIP(s)

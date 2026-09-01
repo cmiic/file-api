@@ -17,11 +17,13 @@ import (
 // have them dialled. The claim this guard makes is "public unicast only", so
 // the list has to match the claim.
 //
-// Two IPv6 entries are here for a subtler reason: 64:ff9b::/96 (NAT64) and
-// 2002::/16 (6to4) embed an IPv4 address inside an IPv6 one. net.IP's
-// predicates do not look inside, so 64:ff9b::7f00:1 - which is 127.0.0.1 - is
-// not reported as loopback. Blocking the translation prefixes outright is
-// simpler and safer than decoding them.
+// Several IPv6 entries are here for a subtler reason. The NAT64 prefixes
+// (64:ff9b::/96 well-known, 64:ff9b:1::/48 local-use), 6to4 (2002::/16) and
+// Teredo (inside 2001::/23) all embed an IPv4 address inside an IPv6 one.
+// net.IP's predicates do not look inside, so 64:ff9b::7f00:1 - which is
+// 127.0.0.1 - is not reported as loopback. Where such a translator is routed,
+// an attacker picks the inner address. Blocking the translation prefixes
+// outright is simpler and safer than decoding them.
 //
 // ::ffff:0:0/96 is deliberately absent: net.IP.To4 returns a 4-byte form for
 // IPv4-mapped addresses, so they are matched against the IPv4 list below and
@@ -45,15 +47,19 @@ var blockedCIDRs = mustParseCIDRs([]string{
 	"240.0.0.0/4",     // reserved, includes 255.255.255.255 broadcast
 
 	// IPv6
-	"::/128",        // unspecified
-	"::1/128",       // loopback
-	"64:ff9b::/96",  // NAT64 - embeds IPv4, see above
-	"100::/64",      // discard-only
-	"2001:db8::/32", // documentation
-	"2002::/16",     // 6to4 - embeds IPv4, see above
-	"fc00::/7",      // unique local
-	"fe80::/10",     // link-local
-	"ff00::/8",      // multicast
+	"::/128",         // unspecified
+	"::1/128",        // loopback
+	"64:ff9b::/96",   // NAT64 well-known prefix - embeds IPv4, see above
+	"64:ff9b:1::/48", // NAT64 local-use prefix (RFC 8215) - same
+	"100::/64",       // discard-only
+	"2001::/23",      // IETF protocol assignments: Teredo, benchmarking, ORCHIDv2
+	"2001:db8::/32",  // documentation (outside 2001::/23, needs its own entry)
+	"2002::/16",      // 6to4 - embeds IPv4, see above
+	"3fff::/20",      // documentation (RFC 9637)
+	"5f00::/16",      // SRv6 segment identifiers (RFC 9602)
+	"fc00::/7",       // unique local
+	"fe80::/10",      // link-local
+	"ff00::/8",       // multicast
 })
 
 func mustParseCIDRs(cidrs []string) []*net.IPNet {
