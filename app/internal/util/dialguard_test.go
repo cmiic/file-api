@@ -97,9 +97,17 @@ func TestSafeDialControlRejectsNonPublic(t *testing.T) {
 
 // TestDialGuardBlocksStringCheckBypasses is the regression test for the SSRF.
 //
-// Every URL here passed IsValidURL before the guard existed, and every one
-// reaches loopback: net.ParseIP rejects these spellings so the old private-IP
-// check never ran, while the system resolver accepts them.
+// Every URL here passed IsValidURL before the guard existed: net.ParseIP
+// rejects these spellings, so the old private-IP check never ran on them.
+//
+// Whether a given spelling then reaches loopback depends on the resolver.
+// "LOCALHOST" and "localhost." resolve through the hosts file everywhere, and
+// "0.0.0.0" is parsed as an address without a lookup. The inet_aton forms -
+// "127.1", "2130706433", "0177.0.0.1" - are accepted by glibc but not by Go's
+// pure-Go resolver, which is what the release image uses (CGO_ENABLED=0 on
+// debian-slim). Those cases are skipped where they do not resolve rather than
+// asserted, so this test means the same thing on a developer machine and in
+// CI. What is asserted unconditionally is that none of them connects.
 func TestDialGuardBlocksStringCheckBypasses(t *testing.T) {
 	client := &http.Client{
 		Timeout: 5 * time.Second,
@@ -127,9 +135,16 @@ func TestDialGuardBlocksStringCheckBypasses(t *testing.T) {
 				resp.Body.Close()
 				t.Fatalf("%s was dialled successfully; the guard did not hold", tt.url)
 			}
-			// Distinguish "the guard refused" from "the host happened not to
-			// resolve here", so this cannot pass for the wrong reason.
-			if !strings.Contains(err.Error(), "refusing to dial") {
+
+			// Distinguish "the guard refused" from "this resolver never
+			// produced an address", so the test cannot pass for the wrong
+			// reason and cannot fail for an irrelevant one.
+			switch msg := err.Error(); {
+			case strings.Contains(msg, "refusing to dial"):
+				// The guard fired. This is the case under test.
+			case strings.Contains(msg, "no such host"):
+				t.Skipf("%s: this resolver does not accept the spelling, so the guard was never reached", tt.url)
+			default:
 				t.Errorf("%s failed for an unrelated reason: %v", tt.url, err)
 			}
 		})
