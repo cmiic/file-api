@@ -120,13 +120,23 @@ func (n *Notifier) buildMessage(subject, body string) string {
 // The stored path embeds the uploader's own filename - sanitised, but still
 // theirs - and these alerts go to operators. For a cli/ upload that filename
 // can carry client information the operator has no business receiving, so it
-// stays out of the message. The SHA1 locates the file just as well, is unique
-// per stored file because it is what deduplication keys on, and is derived
-// from content rather than supplied by anyone.
+// stays out of the message. The SHA1 is derived from content rather than
+// supplied by anyone, and locates the file well enough to act on.
+//
+// It is not a unique locator, and the message says so. StoreFile deduplicates
+// on the whole final path, which includes the uploader's base name, so the
+// same bytes stored under two names are two files sharing one hash - see
+// TestDedupIsPerPathNotPerDigest. That is worth stating rather than hiding:
+// every match is byte-identical to the file the alert is about, so for a
+// malware alert the extra hits are the same malicious content under other
+// names and want handling too.
 const locateHint = "Locate it by hash:\n" +
 	"  find $BASE_PATH -name '*%s*'\n\n" +
 	"The filename is omitted deliberately: it comes from the uploader and may\n" +
-	"carry client information.\n"
+	"carry client information. The hash is not unique per path - identical\n" +
+	"bytes stored under different names are separate files sharing it - so the\n" +
+	"command may match more than one. Every match is byte-identical to the\n" +
+	"file this alert is about.\n"
 
 // MalwareAlert sends an alert about a malware detection.
 func (n *Notifier) MalwareAlert(sha1, scope, malwareName string) error {
