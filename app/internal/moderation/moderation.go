@@ -219,19 +219,26 @@ func (s *Service) scan(relativePath, absPath, clientCode, sha1 string, isPublic 
 				now := time.Now()
 				meta.CompletedAt = &now
 
-				// Delete the file immediately
-				if err := s.deleteFile(relativePath); err != nil {
-					log.Printf("Failed to delete malware file %q: %v", relativePath, err)
-				} else {
-					log.Printf("Deleted malware file: %q (%q)", relativePath, *result.MalwareName)
-				}
-
-				// Save metadata and notify
-				s.saveMetadata(relativePath, meta)
+				// MalwareName is optional in the scanner's response, and it
+				// was dereferenced unguarded by the log line below while the
+				// alert a few lines further down already treated it as
+				// nil-able. scan() runs as a goroutine, so that panic would
+				// have taken the process down - on a malware detection, which
+				// is the worst moment to lose the service. Resolved once, here.
 				malwareName := "unknown"
 				if result.MalwareName != nil {
 					malwareName = *result.MalwareName
 				}
+
+				// Delete the file immediately
+				if err := s.deleteFile(relativePath); err != nil {
+					log.Printf("Failed to delete malware file %q: %v", relativePath, err)
+				} else {
+					log.Printf("Deleted malware file: %q (%q)", relativePath, malwareName)
+				}
+
+				// Save metadata and notify
+				s.saveMetadata(relativePath, meta)
 				s.notifier.MalwareAlert(sha1, scopeOf(isPublic), malwareName)
 				return // Don't continue with NSFW scan
 			}

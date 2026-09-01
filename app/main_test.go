@@ -22,13 +22,18 @@ import (
 //
 // %q escapes it into the single quoted field it belongs in.
 func TestLoggingMiddlewareCannotForgeLogLines(t *testing.T) {
+	// Capture and restore what was configured, rather than assuming the
+	// defaults. Restoring a nil writer would panic the next log call in this
+	// package.
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	t.Cleanup(func() {
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	})
+
 	var buf bytes.Buffer
 	log.SetOutput(&buf)
 	log.SetFlags(0)
-	t.Cleanup(func() {
-		log.SetOutput(nil)
-		log.SetFlags(log.LstdFlags)
-	})
 
 	handler := loggingMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 
