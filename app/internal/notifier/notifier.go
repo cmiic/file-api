@@ -115,45 +115,112 @@ func (n *Notifier) buildMessage(subject, body string) string {
 	)
 }
 
+// Alerts identify a file by its content hash, never by its path.
+//
+// The stored path embeds the uploader's own filename - sanitised, but still
+// theirs - and these alerts go to whoever is on ALERT_EMAILS. A filename can
+// carry information that has no business in an operator mailbox, so it stays
+// out of the message. The SHA1 is derived from content rather than supplied by
+// anyone, and locates the file well enough to act on.
+//
+// Scope is reported alongside it, and is currently always "public": moderation
+// only scans public uploads (ProcessUpload returns early when !isPublic), so a
+// private cli/ upload never reaches an alert today. The distinction is carried
+// anyway because it costs a bool, and because the day private scanning is
+// switched on is not the day to rediscover that alerts name client files.
+//
+// It is not a unique locator, and the message says so. StoreFile deduplicates
+// on the whole final path, which includes the uploader's base name, so the
+// same bytes stored under two names are two files sharing one hash - see
+// TestDedupIsPerPathNotPerDigest. That is worth stating rather than hiding:
+// for a malware alert the extra hits are the same content under other names
+// and want handling too.
+//
+// The message says matches share a SHA1, not that they are byte-identical.
+// SHA1 collisions are constructible, and a malware alert is exactly the
+// context where claiming more than the digest supports would be wrong.
+const locateHint = "Locate it by hash:\n" +
+	"  find \"$BASE_PATH\" -type f -name '*%s*'\n\n" +
+	"The filename is omitted deliberately: it comes from the uploader and may\n" +
+	"carry information that does not belong in an operator mailbox. The hash is\n" +
+	"not unique per path - identical bytes stored under different names are\n" +
+	"separate files sharing it - so the command may match more than one. Every\n" +
+	"match has the same SHA1 as the file this alert is about.\n"
+
+// noHashHint replaces the locator when the hash is missing. An empty hash
+// would render the find pattern as '**', which matches every stored file -
+// a locator pointing at everything is worse than none, because an operator
+// may act on it.
+const noHashHint = "No content hash was available for this file, so no locator\n" +
+	"can be given. The scan metadata under SCAN_META_PATH records the path.\n"
+
+// fileLocator renders the "how to find it" half of an alert body.
+func fileLocator(sha1 string) string {
+	if sha1 == "" {
+		return noHashHint
+	}
+	return fmt.Sprintf(locateHint, sha1)
+}
+
+// hashOrUnknown keeps an empty hash from being displayed as a blank field.
+func hashOrUnknown(sha1 string) string {
+	if sha1 == "" {
+		return "(unavailable)"
+	}
+	return sha1
+}
+
 // MalwareAlert sends an alert about a malware detection.
-func (n *Notifier) MalwareAlert(relativePath, malwareName string) error {
+func (n *Notifier) MalwareAlert(sha1, scope, malwareName string) error {
 	subject := "[file-api] Malware detected and removed"
 	body := fmt.Sprintf("Malware detected in uploaded file.\n\n"+
-		"File: %s\n"+
+		"SHA1: %s\n"+
+		"Scope: %s\n"+
 		"Malware: %s\n"+
-		"Action: File deleted, metadata preserved\n",
-		relativePath,
+		"Action: File deleted, metadata preserved\n\n"+
+		"%s",
+		hashOrUnknown(sha1),
+		scope,
 		malwareName,
+		fileLocator(sha1),
 	)
 	return n.SendAlert(subject, body)
 }
 
 // NSFWAlert sends an alert about NSFW content detection.
-func (n *Notifier) NSFWAlert(relativePath string, confidence float64, classes []string) error {
+func (n *Notifier) NSFWAlert(sha1, scope string, confidence float64, classes []string) error {
 	subject := "[file-api] NSFW content detected"
 	body := fmt.Sprintf("NSFW content detected in uploaded file.\n\n"+
-		"File: %s\n"+
+		"SHA1: %s\n"+
+		"Scope: %s\n"+
 		"Confidence: %.2f\n"+
 		"Classes: %s\n"+
-		"Action: File flagged for review\n",
-		relativePath,
+		"Action: File flagged for review\n\n"+
+		"%s",
+		hashOrUnknown(sha1),
+		scope,
 		confidence,
 		strings.Join(classes, ", "),
+		fileLocator(sha1),
 	)
 	return n.SendAlert(subject, body)
 }
 
 // ScanErrorAlert sends an alert about a scan failure.
-func (n *Notifier) ScanErrorAlert(relativePath, scanType, errorMsg string) error {
+func (n *Notifier) ScanErrorAlert(sha1, scope, scanType, errorMsg string) error {
 	subject := fmt.Sprintf("[file-api] %s scan failed", scanType)
 	body := fmt.Sprintf("Scan failed for uploaded file.\n\n"+
-		"File: %s\n"+
+		"SHA1: %s\n"+
+		"Scope: %s\n"+
 		"Scan type: %s\n"+
 		"Error: %s\n"+
-		"Action: Queued for retry\n",
-		relativePath,
+		"Action: Queued for retry\n\n"+
+		"%s",
+		hashOrUnknown(sha1),
+		scope,
 		scanType,
 		errorMsg,
+		fileLocator(sha1),
 	)
 	return n.SendAlert(subject, body)
 }

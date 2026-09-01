@@ -134,7 +134,11 @@ func TestBuildMessageBodyCannotIntroduceHeaders(t *testing.T) {
 // This guards our code, not the stdlib's: if SendAlert is ever changed
 // to hand-roll the SMTP conversation, the assumption breaks and this
 // test catches it.
-func TestSendAlertBodyCannotSmuggleSMTPCommands(t *testing.T) {
+// captureSMTP runs send against a fake SMTP server and returns the raw bytes
+// the client transmitted inside DATA, plus how many transactions it opened.
+func captureSMTP(t *testing.T, send func(n *Notifier)) (raw string, transactions int) {
+	t.Helper()
+
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Skipf("cannot listen on loopback: %v", err)
@@ -160,7 +164,7 @@ func TestSendAlertBodyCannotSmuggleSMTPCommands(t *testing.T) {
 		say := func(s string) { w.WriteString(s + "\r\n"); w.Flush() }
 
 		say("220 fake ESMTP")
-		var raw strings.Builder
+		var buf strings.Builder
 		cap := capture{}
 		inData := false
 
@@ -170,7 +174,7 @@ func TestSendAlertBodyCannotSmuggleSMTPCommands(t *testing.T) {
 				break
 			}
 			if inData {
-				raw.WriteString(line)
+				buf.WriteString(line)
 				if line == ".\r\n" {
 					say("250 OK")
 					inData = false
@@ -189,39 +193,114 @@ func TestSendAlertBodyCannotSmuggleSMTPCommands(t *testing.T) {
 				inData = true
 			case strings.HasPrefix(cmd, "QUIT"):
 				say("221 bye")
-				cap.raw = raw.String()
+				cap.raw = buf.String()
 				done <- cap
 				return
 			default:
 				say("250 OK")
 			}
 		}
-		cap.raw = raw.String()
+		cap.raw = buf.String()
 		done <- cap
 	}()
 
 	host, port, _ := net.SplitHostPort(ln.Addr().String())
 	p, _ := strconv.Atoi(port)
-	n := &Notifier{
+	send(&Notifier{
 		host:       host,
 		port:       p,
 		from:       "file-api@example.invalid",
 		recipients: []string{"ops@example.invalid"},
 		enabled:    true,
-	}
-
-	// A malware name that tries to close DATA and open a new transaction.
-	evil := "Trojan\r\n.\r\nMAIL FROM:<attacker@evil.invalid>\r\nRCPT TO:<victim@evil.invalid>\r\nDATA\r\nSmuggled\r\n.\r\n"
-	if err := n.MalwareAlert("2026/1/photo.jpg", evil); err != nil {
-		t.Fatalf("MalwareAlert: %v", err)
-	}
+	})
 
 	got := <-done
-	if got.transactions != 1 {
-		t.Errorf("expected exactly 1 SMTP transaction, got %d - body smuggled a command", got.transactions)
+	return got.raw, got.transactions
+}
+
+const testSHA1 = "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+
+// TestSendAlertBodyCannotSmuggleSMTPCommands is the load-bearing test for
+// leaving the body unsanitized. A body containing a lone "." line would end
+// DATA early and let everything after it be read as SMTP commands - if the
+// transport did not dot-stuff. net/smtp does, so the smuggled commands stay
+// inside the message.
+//
+// This guards our code, not the stdlib's: if SendAlert is ever changed to
+// hand-roll the SMTP conversation, the assumption breaks and this test catches
+// it.
+func TestSendAlertBodyCannotSmuggleSMTPCommands(t *testing.T) {
+	// A malware name that tries to close DATA and open a new transaction.
+	evil := "Trojan\r\n.\r\nMAIL FROM:<attacker@evil.invalid>\r\nRCPT TO:<victim@evil.invalid>\r\nDATA\r\nSmuggled\r\n.\r\n"
+
+	raw, transactions := captureSMTP(t, func(n *Notifier) {
+		if err := n.MalwareAlert(testSHA1, "public", evil); err != nil {
+			t.Errorf("MalwareAlert: %v", err)
+		}
+	})
+
+	if transactions != 1 {
+		t.Errorf("expected exactly 1 SMTP transaction, got %d - body smuggled a command", transactions)
 	}
-	if !strings.Contains(got.raw, "..\r\n") {
-		t.Errorf("expected the lone dot to be dot-stuffed, raw stream:\n%q", got.raw)
+	if !strings.Contains(raw, "..\r\n") {
+		t.Errorf("expected the lone dot to be dot-stuffed, raw stream:\n%q", raw)
+	}
+}
+
+// TestAlertsIdentifyFilesByHashNotName pins why these alerts take a SHA1
+// rather than the stored relative path.
+//
+// The path embeds the uploader's own filename. It is sanitised, but it is
+// still theirs, and it can carry information that has no business in an
+// operator mailbox. The hash locates the file well enough to act on and is
+// derived from content rather than supplied by anyone.
+//
+// It is not a unique locator - StoreFile deduplicates on the whole final path,
+// so the same bytes under two names are two files sharing one hash. See
+// storage.TestDedupIsPerPathNotPerDigest; the alert body says as much.
+func TestAlertsIdentifyFilesByHashNotName(t *testing.T) {
+	alerts := map[string]func(n *Notifier){
+		"malware":    func(n *Notifier) { n.MalwareAlert(testSHA1, "private (client upload)", "Trojan.Test") },
+		"nsfw":       func(n *Notifier) { n.NSFWAlert(testSHA1, "public", 0.97, []string{"explicit"}) },
+		"scan error": func(n *Notifier) { n.ScanErrorAlert(testSHA1, "public", "malware", "backend unreachable") },
+	}
+
+	for name, send := range alerts {
+		t.Run(name, func(t *testing.T) {
+			raw, _ := captureSMTP(t, send)
+
+			if !strings.Contains(raw, testSHA1) {
+				t.Errorf("expected the SHA1 in the message, got:\n%s", raw)
+			}
+			// Nothing path- or filename-shaped may appear. These are the
+			// shapes a stored relative path takes: cli/{code}/{y}/{m}/{name}.
+			for _, leak := range []string{"cli/", ".jpg", ".pdf", ".bin"} {
+				if strings.Contains(raw, leak) {
+					t.Errorf("message contains %q, which is uploader-derived:\n%s", leak, raw)
+				}
+			}
+		})
+	}
+}
+
+// TestAlertWithNoHashEmitsNoWildcardLocator covers the case where a scan job
+// carries no hash - a queue entry written before alerts identified files that
+// way. Rendering the locator anyway would produce "find -name '**'", which
+// matches every stored file: a locator pointing at everything is worse than
+// none, because an operator may act on it.
+func TestAlertWithNoHashEmitsNoWildcardLocator(t *testing.T) {
+	raw, _ := captureSMTP(t, func(n *Notifier) {
+		n.MalwareAlert("", "public", "Trojan.Test")
+	})
+
+	if strings.Contains(raw, "'**'") || strings.Contains(raw, "-name '*'") {
+		t.Errorf("alert offered a locator matching every file:\n%s", raw)
+	}
+	if !strings.Contains(raw, "(unavailable)") {
+		t.Errorf("expected the missing hash to be named explicitly:\n%s", raw)
+	}
+	if !strings.Contains(raw, "no locator") {
+		t.Errorf("expected the body to say no locator can be given:\n%s", raw)
 	}
 }
 
