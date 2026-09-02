@@ -25,7 +25,11 @@ func main() {
 	}
 
 	// Initialize storage
-	store := storage.NewStorage(cfg.BasePath, cfg.MaxFilenameLen)
+	store, err := storage.NewStorage(cfg.BasePath, cfg.MaxFilenameLen)
+	if err != nil {
+		log.Fatalf("Failed to open storage root: %v", err)
+	}
+	defer store.Close()
 
 	// Ensure base path exists
 	if err := os.MkdirAll(cfg.BasePath, 0755); err != nil {
@@ -52,6 +56,7 @@ func main() {
 			cfg.ScanMetaPath,
 			cfg.ScanQueuePath,
 			store.DeleteFile,
+			store.Open,
 		)
 		log.Printf("Moderation enabled: malware=%v, nsfw=%v",
 			cfg.MalwareScannerURL != "", cfg.MediaScreenerURL != "")

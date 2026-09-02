@@ -30,7 +30,7 @@ func newMetaTestServer(t *testing.T) (http.Handler, string) {
 		t.Fatalf("write secret: %v", err)
 	}
 
-	svc := moderation.NewService(nil, nil, metaPath, queuePath, nil)
+	svc := moderation.NewService(nil, nil, metaPath, queuePath, nil, nil)
 
 	// A legitimate metadata file inside metaPath.
 	if err := os.MkdirAll(filepath.Join(metaPath, "2026", "1"), 0755); err != nil {

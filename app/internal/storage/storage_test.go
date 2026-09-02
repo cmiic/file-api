@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,7 +12,11 @@ import (
 // over, but StoreFile is exported and its signature promises nothing, so the
 // check that turns the value into a path component lives next to that use.
 func TestStoreFileRejectsUnsafeClientCode(t *testing.T) {
-	s := NewStorage(t.TempDir(), 60)
+	s, err := NewStorage(t.TempDir(), 60)
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
 
 	unsafe := []struct {
 		name string
@@ -40,7 +45,11 @@ func TestStoreFileRejectsUnsafeClientCode(t *testing.T) {
 
 func TestStoreFileAcceptsValidClientCode(t *testing.T) {
 	base := t.TempDir()
-	s := NewStorage(base, 60)
+	s, err := NewStorage(base, 60)
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
 
 	info, err := s.StoreFile(strings.NewReader("payload"), "photo.jpg", "ACME")
 	if err != nil {
@@ -59,7 +68,11 @@ func TestStoreFileAcceptsValidClientCode(t *testing.T) {
 
 // A public upload passes an empty client code, which must stay allowed.
 func TestStoreFileAllowsEmptyClientCode(t *testing.T) {
-	s := NewStorage(t.TempDir(), 60)
+	s, err := NewStorage(t.TempDir(), 60)
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
 
 	// The filename deliberately contains "cli" - a substring check would call
 	// this a private upload.
@@ -74,17 +87,56 @@ func TestStoreFileAllowsEmptyClientCode(t *testing.T) {
 	}
 }
 
-// The stored path must stay inside the base directory for every accepted input.
-func TestStoreFileStaysInsideBase(t *testing.T) {
+// TestStorageRootContainsEscapes covers what os.Root buys over validating the
+// string first: containment is enforced when the file is opened, so it holds
+// for names no amount of inspection would catch.
+func TestStorageRootContainsEscapes(t *testing.T) {
 	base := t.TempDir()
-	s := NewStorage(base, 60)
+	outside := filepath.Join(filepath.Dir(base), "outside-"+filepath.Base(base)+".txt")
+	if err := os.WriteFile(outside, []byte("SECRET"), 0o644); err != nil {
+		t.Fatalf("plant file: %v", err)
+	}
+	t.Cleanup(func() { os.Remove(outside) })
 
+	s, err := NewStorage(base, 60)
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	// A stored file opens normally.
 	info, err := s.StoreFile(strings.NewReader("payload"), "photo.jpg", "ACME")
 	if err != nil {
 		t.Fatalf("StoreFile: %v", err)
 	}
-	full := s.GetFilePath(info.RelativePath)
-	if !strings.HasPrefix(filepath.Clean(full), filepath.Clean(base)+string(filepath.Separator)) {
-		t.Errorf("stored path escaped the base directory: %q not under %q", full, base)
+	f, err := s.Open(info.RelativePath)
+	if err != nil {
+		t.Fatalf("Open(%q): %v", info.RelativePath, err)
+	}
+	f.Close()
+
+	// Traversal is refused by the root, not by a prior string check.
+	for _, name := range []string{
+		"../" + filepath.Base(outside),
+		"../../etc/passwd",
+		"cli/../../" + filepath.Base(outside),
+	} {
+		if f, err := s.Open(name); err == nil {
+			f.Close()
+			t.Errorf("Open(%q) succeeded; the root did not contain it", name)
+		}
+	}
+
+	// The case a string check cannot see: a symlink inside the root pointing
+	// out of it. The name is perfectly ordinary; only the open can tell.
+	link := filepath.Join(base, "escape")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+	if f, err := s.Open("escape"); err == nil {
+		buf := make([]byte, 6)
+		n, _ := f.Read(buf)
+		f.Close()
+		t.Errorf("Open followed a symlink out of the root and read %q", string(buf[:n]))
 	}
 }

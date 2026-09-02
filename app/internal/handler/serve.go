@@ -76,11 +76,9 @@ func (h *ServeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Get full file path
-	fullPath := h.storage.GetFilePath(sanitizedPath)
-
-	// Check if file exists before setting cache headers
-	info, err := os.Stat(fullPath)
+	// Stat through the storage root: a name that escapes it fails here rather
+	// than reaching the filesystem.
+	info, err := h.storage.Stat(sanitizedPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			http.Error(w, "Not Found", http.StatusNotFound)
@@ -104,7 +102,7 @@ func (h *ServeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Set content type based on extension
-	ext := filepath.Ext(fullPath)
+	ext := filepath.Ext(sanitizedPath)
 	contentType := mime.TypeByExtension(ext)
 	if contentType != "" {
 		w.Header().Set("Content-Type", contentType)
@@ -113,12 +111,24 @@ func (h *ServeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Force download for non-safe content types to prevent XSS
 	// Safe types (images, video, audio, PDF) can render inline
 	if !safeInlineTypes[contentType] {
-		filename := filepath.Base(fullPath)
+		filename := filepath.Base(sanitizedPath)
 		w.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
 	}
 
-	// Serve the file
-	http.ServeFile(w, r, fullPath)
+	// Serve the file through the storage root.
+	//
+	// ServeContent rather than ServeFile: ServeFile takes a path and opens it
+	// itself, outside the root, which would give up the guarantee this handler
+	// just established by statting through it. ServeContent takes the open
+	// file and still provides Range and conditional-request handling.
+	f, err := h.storage.Open(sanitizedPath)
+	if err != nil {
+		http.Error(w, "Not Found", http.StatusNotFound)
+		return
+	}
+	defer f.Close()
+
+	http.ServeContent(w, r, sanitizedPath, info.ModTime(), f)
 }
 
 // HealthHandler provides a health check endpoint.

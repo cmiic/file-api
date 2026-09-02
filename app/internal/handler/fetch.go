@@ -166,15 +166,18 @@ func (h *FetchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// same fallback rules: probe wins on a recognised format, form
 	// fields win when the probe returns zero.
 	origWidth, origHeight := formOrigWidth, formOrigHeight
-	absPath := h.storage.GetFilePath(info.RelativePath)
-	pw, ph, perr := image.ProbeDims(absPath)
-	if perr != nil {
-		log.Printf("[fetch] probe %q: %v", info.RelativePath, perr)
+	if f, oErr := h.storage.Open(info.RelativePath); oErr != nil {
+		log.Printf("[fetch] open for probe %q: %v", info.RelativePath, oErr)
+	} else {
+		pw, ph, perr := image.ProbeDims(f)
+		f.Close()
+		if perr != nil {
+			log.Printf("[fetch] probe %q: %v", info.RelativePath, perr)
+		}
+		if pw > 0 && ph > 0 {
+			origWidth, origHeight = pw, ph
+		}
 	}
-	if pw > 0 && ph > 0 {
-		origWidth, origHeight = pw, ph
-	}
-
 	metaToken, mErr := auth.Mint(h.jwtSecret, info.RelativePath, info.Size, origWidth, origHeight)
 	if mErr != nil {
 		log.Printf("[fetch] mint meta_token: %v", mErr)
