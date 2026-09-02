@@ -67,7 +67,7 @@ func (h *MetaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// The underlying error carries absolute filesystem paths -
 		// log it, don't hand it to the caller.
-		log.Printf("[meta] read metadata %s: %v", relativePath, err)
+		log.Printf("[meta] read metadata %q: %v", relativePath, err)
 		http.Error(w, "Failed to read metadata", http.StatusInternalServerError)
 		return
 	}

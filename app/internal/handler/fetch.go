@@ -169,7 +169,7 @@ func (h *FetchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	absPath := h.storage.GetFilePath(info.RelativePath)
 	pw, ph, perr := image.ProbeDims(absPath)
 	if perr != nil {
-		log.Printf("[fetch] probe %s: %v", info.RelativePath, perr)
+		log.Printf("[fetch] probe %q: %v", info.RelativePath, perr)
 	}
 	if pw > 0 && ph > 0 {
 		origWidth, origHeight = pw, ph

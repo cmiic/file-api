@@ -146,7 +146,7 @@ func (h *UploadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	absPath := h.storage.GetFilePath(info.RelativePath)
 	pw, ph, perr := image.ProbeDims(absPath)
 	if perr != nil {
-		log.Printf("[upload] probe %s: %v", info.RelativePath, perr)
+		log.Printf("[upload] probe %q: %v", info.RelativePath, perr)
 	}
 	if pw > 0 && ph > 0 {
 		origWidth, origHeight = pw, ph
