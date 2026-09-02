@@ -8,7 +8,6 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
-	"os"
 	"path/filepath"
 	"time"
 )
@@ -73,13 +72,13 @@ func (c *Client) NSFWEnabled() bool {
 
 // ScanMalware sends a file to the malware scanner and returns the detailed result.
 // Returns nil result and nil error if malware scanning is disabled.
-func (c *Client) ScanMalware(filePath string) (*MalwareScanResult, error) {
+func (c *Client) ScanMalware(name string, content io.Reader) (*MalwareScanResult, error) {
 	if !c.MalwareEnabled() {
 		return nil, nil
 	}
 
 	url := c.malwareScannerURL + "/scan"
-	resp, err := c.uploadFile(url, filePath)
+	resp, err := c.uploadFile(url, name, content)
 	if err != nil {
 		return nil, fmt.Errorf("malware scan request failed: %w", err)
 	}
@@ -100,13 +99,13 @@ func (c *Client) ScanMalware(filePath string) (*MalwareScanResult, error) {
 
 // ScanNSFW sends a file to the media screener and returns the result.
 // Returns nil result and nil error if NSFW scanning is disabled.
-func (c *Client) ScanNSFW(filePath string) (*NSFWResult, error) {
+func (c *Client) ScanNSFW(name string, content io.Reader) (*NSFWResult, error) {
 	if !c.NSFWEnabled() {
 		return nil, nil
 	}
 
 	url := c.mediaScreenerURL + "/classify"
-	resp, err := c.uploadFile(url, filePath)
+	resp, err := c.uploadFile(url, name, content)
 	if err != nil {
 		return nil, fmt.Errorf("nsfw scan request failed: %w", err)
 	}
@@ -125,24 +124,22 @@ func (c *Client) ScanNSFW(filePath string) (*NSFWResult, error) {
 	return &result, nil
 }
 
-// uploadFile sends a file as multipart/form-data to the given URL.
-func (c *Client) uploadFile(url, filePath string) (*http.Response, error) {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open file: %w", err)
-	}
-	defer file.Close()
-
+// uploadFile sends content as multipart/form-data to the given URL.
+//
+// Takes an open reader rather than a path. The caller opens through the
+// storage root, so the scanner cannot be aimed at a file outside it, and this
+// package no longer touches the filesystem at all.
+func (c *Client) uploadFile(url, name string, content io.Reader) (*http.Response, error) {
 	// Create multipart form
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
 
-	part, err := writer.CreateFormFile("file", filepath.Base(filePath))
+	part, err := writer.CreateFormFile("file", filepath.Base(name))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create form file: %w", err)
 	}
 
-	if _, err := io.Copy(part, file); err != nil {
+	if _, err := io.Copy(part, content); err != nil {
 		return nil, fmt.Errorf("failed to copy file content: %w", err)
 	}
 

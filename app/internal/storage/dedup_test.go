@@ -17,7 +17,11 @@ import (
 // that sentence is there.
 func TestDedupIsPerPathNotPerDigest(t *testing.T) {
 	base := t.TempDir()
-	s := NewStorage(base, 60)
+	s, err := NewStorage(base, 60)
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
 
 	const content = "identical bytes"
 

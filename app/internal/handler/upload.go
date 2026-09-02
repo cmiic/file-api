@@ -143,15 +143,18 @@ func (h *UploadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// only get logged — they never fail the upload, and the form
 	// fallback covers the response.
 	origWidth, origHeight := formOrigWidth, formOrigHeight
-	absPath := h.storage.GetFilePath(info.RelativePath)
-	pw, ph, perr := image.ProbeDims(absPath)
-	if perr != nil {
-		log.Printf("[upload] probe %q: %v", info.RelativePath, perr)
+	if f, oErr := h.storage.Open(info.RelativePath); oErr != nil {
+		log.Printf("[upload] open for probe %q: %v", info.RelativePath, oErr)
+	} else {
+		pw, ph, perr := image.ProbeDims(f)
+		f.Close()
+		if perr != nil {
+			log.Printf("[upload] probe %q: %v", info.RelativePath, perr)
+		}
+		if pw > 0 && ph > 0 {
+			origWidth, origHeight = pw, ph
+		}
 	}
-	if pw > 0 && ph > 0 {
-		origWidth, origHeight = pw, ph
-	}
-
 	// Mint the meta_token so downstream backends can verify the
 	// dims weren't tampered with after they left this process.
 	// Errors are logged + the response goes out without the field;
@@ -164,7 +167,7 @@ func (h *UploadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Trigger async moderation scan for public uploads
 	isPublic := clientCode == ""
 	if h.moderation != nil {
-		h.moderation.ProcessUpload(info.RelativePath, absPath, clientCode, info.SHA1, isPublic)
+		h.moderation.ProcessUpload(info.RelativePath, clientCode, info.SHA1, isPublic)
 	}
 
 	// Build response

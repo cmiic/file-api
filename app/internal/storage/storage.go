@@ -25,18 +25,43 @@ type FileInfo struct {
 }
 
 // Storage handles file operations.
+//
+// Every filesystem operation goes through root, an *os.Root anchored at the
+// base directory. Root refuses any name that resolves outside it - including
+// through a symlink - so containment is enforced by the kernel-facing API
+// rather than by inspecting the string first. The validation in StoreFile and
+// the handlers stays as the fast, legible rejection; this is what makes it
+// true even if one of those is bypassed or forgotten.
 type Storage struct {
 	BasePath       string
 	MaxFilenameLen int
+
+	root *os.Root
 }
 
-// NewStorage creates a new Storage instance.
-func NewStorage(basePath string, maxFilenameLen int) *Storage {
+// NewStorage creates basePath if it is missing and opens it as a storage root.
+//
+// It creates the directory itself rather than relying on a caller to do it
+// first: os.OpenRoot requires an existing directory, so leaving that to
+// call-ordering makes a fresh deployment fail at startup depending on which
+// line runs first.
+func NewStorage(basePath string, maxFilenameLen int) (*Storage, error) {
+	if err := os.MkdirAll(basePath, 0755); err != nil {
+		return nil, fmt.Errorf("create storage base %q: %w", basePath, err)
+	}
+	root, err := os.OpenRoot(basePath)
+	if err != nil {
+		return nil, fmt.Errorf("open storage root %q: %w", basePath, err)
+	}
 	return &Storage{
 		BasePath:       basePath,
 		MaxFilenameLen: maxFilenameLen,
-	}
+		root:           root,
+	}, nil
 }
+
+// Close releases the storage root.
+func (s *Storage) Close() error { return s.root.Close() }
 
 // StoreFile stores a file from an io.Reader, computing SHA1 for deduplication.
 // Returns FileInfo with the relative path and metadata.
@@ -65,11 +90,13 @@ func (s *Storage) StoreFile(r io.Reader, originalFilename, clientCode string) (*
 		ext = "bin" // Default extension for unknown types
 	}
 
-	// Generate storage directory path
-	storageDir := GenerateStoragePath(s.BasePath, clientCode)
+	// Directory for this upload, relative to the root, computed once so a
+	// request crossing a month boundary cannot land its temp file and its
+	// final file in different directories.
+	storageDir := GenerateStorageDir(clientCode)
 
 	// Ensure directory exists
-	if err := os.MkdirAll(storageDir, 0755); err != nil {
+	if err := s.root.MkdirAll(storageDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create directory: %w", err)
 	}
 
@@ -82,7 +109,7 @@ func (s *Storage) StoreFile(r io.Reader, originalFilename, clientCode string) (*
 	tempPath := filepath.Join(storageDir, tempName)
 
 	// Create temporary file
-	tempFile, err := os.Create(tempPath)
+	tempFile, err := s.root.Create(tempPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp file: %w", err)
 	}
@@ -94,7 +121,7 @@ func (s *Storage) StoreFile(r io.Reader, originalFilename, clientCode string) (*
 	size, err := io.Copy(writer, r)
 	if err != nil {
 		tempFile.Close()
-		os.Remove(tempPath)
+		s.root.Remove(tempPath)
 		return nil, fmt.Errorf("failed to write file: %w", err)
 	}
 	tempFile.Close()
@@ -105,11 +132,11 @@ func (s *Storage) StoreFile(r io.Reader, originalFilename, clientCode string) (*
 	finalPath := filepath.Join(storageDir, finalName)
 
 	// Check for deduplication
-	if _, err := os.Stat(finalPath); err == nil {
+	if _, err := s.root.Stat(finalPath); err == nil {
 		// File already exists - deduplicate
-		os.Remove(tempPath)
+		s.root.Remove(tempPath)
 		return &FileInfo{
-			RelativePath: GenerateRelativePath(clientCode, finalName),
+			RelativePath: finalPath,
 			Size:         size,
 			IsDuplicate:  true,
 			SHA1:         sha1Hex,
@@ -117,35 +144,44 @@ func (s *Storage) StoreFile(r io.Reader, originalFilename, clientCode string) (*
 	}
 
 	// Rename temp file to final path
-	if err := os.Rename(tempPath, finalPath); err != nil {
-		os.Remove(tempPath)
+	if err := s.root.Rename(tempPath, finalPath); err != nil {
+		s.root.Remove(tempPath)
 		return nil, fmt.Errorf("failed to rename file: %w", err)
 	}
 
 	return &FileInfo{
-		RelativePath: GenerateRelativePath(clientCode, finalName),
+		RelativePath: finalPath,
 		Size:         size,
 		IsDuplicate:  false,
 		SHA1:         sha1Hex,
 	}, nil
 }
 
-// GetFilePath returns the full filesystem path for a relative file path.
-func (s *Storage) GetFilePath(relativePath string) string {
-	return filepath.Join(s.BasePath, relativePath)
+// Open opens a stored file for reading. The name is resolved inside the
+// storage root, so a path escaping it fails here rather than reading whatever
+// it pointed at.
+//
+// Callers get a *os.File rather than a path on purpose: handing out an
+// absolute path would move the open outside the root and give up the
+// guarantee.
+func (s *Storage) Open(relativePath string) (*os.File, error) {
+	return s.root.Open(relativePath)
+}
+
+// Stat reports the FileInfo of a stored file.
+func (s *Storage) Stat(relativePath string) (os.FileInfo, error) {
+	return s.root.Stat(relativePath)
 }
 
 // FileExists checks if a file exists at the given relative path.
 func (s *Storage) FileExists(relativePath string) bool {
-	fullPath := s.GetFilePath(relativePath)
-	_, err := os.Stat(fullPath)
+	_, err := s.root.Stat(relativePath)
 	return err == nil
 }
 
 // GetFileSize returns the size of a file at the given relative path.
 func (s *Storage) GetFileSize(relativePath string) (int64, error) {
-	fullPath := s.GetFilePath(relativePath)
-	info, err := os.Stat(fullPath)
+	info, err := s.root.Stat(relativePath)
 	if err != nil {
 		return 0, err
 	}
@@ -154,8 +190,7 @@ func (s *Storage) GetFileSize(relativePath string) (int64, error) {
 
 // DeleteFile removes a file at the given relative path.
 func (s *Storage) DeleteFile(relativePath string) error {
-	fullPath := s.GetFilePath(relativePath)
-	return os.Remove(fullPath)
+	return s.root.Remove(relativePath)
 }
 
 // SanitizeRequestPath cleans and validates a path from an HTTP request.
