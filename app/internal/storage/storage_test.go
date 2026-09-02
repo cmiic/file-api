@@ -87,6 +87,26 @@ func TestStoreFileAllowsEmptyClientCode(t *testing.T) {
 	}
 }
 
+// TestNewStorageCreatesMissingBase pins that NewStorage provisions the
+// directory it roots.
+//
+// os.OpenRoot requires an existing directory, so if this were left to the
+// caller the service would fail at startup on any deployment whose BASE_PATH
+// is not pre-created - and only depending on which line ran first.
+func TestNewStorageCreatesMissingBase(t *testing.T) {
+	fresh := filepath.Join(t.TempDir(), "does", "not", "exist", "yet")
+
+	s, err := NewStorage(fresh, 60)
+	if err != nil {
+		t.Fatalf("NewStorage on a missing base: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	if _, err := s.StoreFile(strings.NewReader("payload"), "a.txt", ""); err != nil {
+		t.Fatalf("StoreFile into a freshly created base: %v", err)
+	}
+}
+
 // TestStorageRootContainsEscapes covers what os.Root buys over validating the
 // string first: containment is enforced when the file is opened, so it holds
 // for names no amount of inspection would catch.

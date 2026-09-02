@@ -41,6 +41,9 @@ type Storage struct {
 
 // NewStorage opens basePath as a storage root. The directory must exist.
 func NewStorage(basePath string, maxFilenameLen int) (*Storage, error) {
+	if err := os.MkdirAll(basePath, 0755); err != nil {
+		return nil, fmt.Errorf("create storage base %q: %w", basePath, err)
+	}
 	root, err := os.OpenRoot(basePath)
 	if err != nil {
 		return nil, fmt.Errorf("open storage root %q: %w", basePath, err)

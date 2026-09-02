@@ -449,11 +449,17 @@ func (s *Service) processQueueOnce() {
 			continue
 		}
 
-		// Check the file still exists, through the storage root.
+		// Check the file still exists, through the storage root. Only a
+		// confirmed-missing file drops the job: a transient failure such as a
+		// permission change or descriptor exhaustion must leave it queued, or
+		// a pending malware scan is silently abandoned along with its alert.
 		f, err := s.openFile(qe.RelativePath)
 		if err != nil {
-			// Gone - drop the job rather than retry it forever.
-			os.Remove(queueFile)
+			if os.IsNotExist(err) {
+				os.Remove(queueFile)
+			} else {
+				log.Printf("Could not open queued file %q, leaving it queued: %v", qe.RelativePath, err)
+			}
 			continue
 		}
 		f.Close()
