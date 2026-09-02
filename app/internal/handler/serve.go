@@ -123,7 +123,14 @@ func (h *ServeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// file and still provides Range and conditional-request handling.
 	f, err := h.storage.Open(sanitizedPath)
 	if err != nil {
-		http.Error(w, "Not Found", http.StatusNotFound)
+		// Same split as the Stat above: a file that vanished between the two
+		// calls is a 404, anything else is a server-side failure and should
+		// not be reported as though the file simply is not there.
+		if os.IsNotExist(err) {
+			http.Error(w, "Not Found", http.StatusNotFound)
+		} else {
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		}
 		return
 	}
 	defer f.Close()

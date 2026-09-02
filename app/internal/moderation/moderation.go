@@ -144,14 +144,25 @@ func NewService(
 		processing: make(map[string]bool),
 	}
 
-	// Start background queue processor
-	go s.processQueue()
+	// Start the background queue processor only when there is something to
+	// retry with. A Service built without a scanner has nothing to do, and
+	// starting the goroutine regardless means it eventually calls into
+	// dependencies that were never supplied.
+	if s.Enabled() {
+		go s.processQueue()
+	}
 
 	return s
 }
 
 // Enabled returns true if any scanning is configured.
 func (s *Service) Enabled() bool {
+	// No scanner means not enabled - that is the honest answer, and it keeps
+	// a partially constructed Service (metadata-only, as the handler tests
+	// build) from panicking here rather than reporting what it can do.
+	if s.scanner == nil {
+		return false
+	}
 	return s.scanner.MalwareEnabled() || s.scanner.NSFWEnabled()
 }
 
