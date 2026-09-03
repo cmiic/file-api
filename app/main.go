@@ -4,7 +4,6 @@ package main
 import (
 	"log"
 	"net/http"
-	"os"
 
 	"file-api/internal/config"
 	"file-api/internal/handler"
@@ -24,13 +23,13 @@ func main() {
 		log.Fatal("FATAL: JWT_SECRET environment variable is required but not set")
 	}
 
-	// Initialize storage
-	store := storage.NewStorage(cfg.BasePath, cfg.MaxFilenameLen)
-
-	// Ensure base path exists
-	if err := os.MkdirAll(cfg.BasePath, 0755); err != nil {
-		log.Fatalf("Failed to create base path %s: %v", cfg.BasePath, err)
+	// Initialize storage. NewStorage creates the base directory and opens it
+	// as the root every file operation is resolved against.
+	store, err := storage.NewStorage(cfg.BasePath, cfg.MaxFilenameLen)
+	if err != nil {
+		log.Fatalf("Failed to initialise storage: %v", err)
 	}
+	defer store.Close()
 
 	// Initialize moderation services (scanner + notifier)
 	var moderationSvc *moderation.Service
@@ -52,6 +51,7 @@ func main() {
 			cfg.ScanMetaPath,
 			cfg.ScanQueuePath,
 			store.DeleteFile,
+			store.Open,
 		)
 		log.Printf("Moderation enabled: malware=%v, nsfw=%v",
 			cfg.MalwareScannerURL != "", cfg.MediaScreenerURL != "")
@@ -128,7 +128,7 @@ func main() {
 // loggingMiddleware logs all incoming requests.
 func loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("%s %s %s", r.Method, r.URL.Path, r.RemoteAddr)
+		log.Printf("%s %q %s", r.Method, r.URL.Path, r.RemoteAddr)
 		next.ServeHTTP(w, r)
 	})
 }

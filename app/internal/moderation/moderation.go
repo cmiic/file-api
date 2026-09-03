@@ -2,8 +2,11 @@
 package moderation
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -52,17 +55,54 @@ type NSFWInfo struct {
 
 // QueueEntry represents a scan job in the retry queue.
 type QueueEntry struct {
-	RelativePath string    `json:"relative_path"`
-	AbsolutePath string    `json:"abs_path"`
+	RelativePath string `json:"relative_path"`
+	// AbsolutePath is retained so queue files written by earlier versions
+	// still unmarshal. Nothing reads it: scanning opens through the storage
+	// root by relative path now.
+	AbsolutePath string    `json:"abs_path,omitempty"`
 	ClientCode   string    `json:"client_code"`
+	SHA1         string    `json:"sha1,omitempty"`
 	IsPublic     bool      `json:"is_public"`
 	QueuedAt     time.Time `json:"queued_at"`
 	Retries      int       `json:"retries"`
 	LastError    string    `json:"last_error,omitempty"`
 }
 
+// fileSHA1 hashes the stored file. Used when a scan job carries no hash of its
+// own, which is the case for queue entries written before alerts identified
+// files by hash: their JSON has no sha1 field, so it unmarshals empty.
+//
+// Recomputed from content rather than parsed out of the stored filename. The
+// filename would be the cheaper source - it ends in "-{sha1}.{ext}" - but it
+// is the uploader's, and pulling the hash back out of it would put that value
+// on the path to the alert again, which is the whole thing this indirection
+// exists to avoid.
+func fileSHA1(r io.Reader) (string, error) {
+	h := sha1.New()
+	if _, err := io.Copy(h, r); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// scopeOf renders the public/private distinction for an operator alert. It is
+// derived from a bool rather than from any request value, so it carries no
+// uploader-supplied text into the message.
+func scopeOf(isPublic bool) string {
+	if isPublic {
+		return "public"
+	}
+	return "private (client upload)"
+}
+
 // DeleteFunc is a function type for deleting files.
 type DeleteFunc func(relativePath string) error
+
+// OpenFunc opens a stored file by its path relative to the storage root.
+// Injected the same way DeleteFunc is, so this package never holds an
+// absolute path and never opens one itself - the open happens inside the
+// storage root, which is what keeps it contained.
+type OpenFunc func(relativePath string) (*os.File, error)
 
 // Service orchestrates scanning, metadata storage, and notifications.
 type Service struct {
@@ -71,6 +111,7 @@ type Service struct {
 	metaPath   string
 	queuePath  string
 	deleteFile DeleteFunc
+	openFile   OpenFunc
 
 	// Background processing
 	mu         sync.Mutex
@@ -83,6 +124,7 @@ func NewService(
 	notifier *notifier.Notifier,
 	metaPath, queuePath string,
 	deleteFile DeleteFunc,
+	openFile OpenFunc,
 ) *Service {
 	// Ensure directories exist
 	if err := os.MkdirAll(metaPath, 0755); err != nil {
@@ -98,23 +140,35 @@ func NewService(
 		metaPath:   metaPath,
 		queuePath:  queuePath,
 		deleteFile: deleteFile,
+		openFile:   openFile,
 		processing: make(map[string]bool),
 	}
 
-	// Start background queue processor
-	go s.processQueue()
+	// Start the background queue processor only when there is something to
+	// retry with. A Service built without a scanner has nothing to do, and
+	// starting the goroutine regardless means it eventually calls into
+	// dependencies that were never supplied.
+	if s.Enabled() {
+		go s.processQueue()
+	}
 
 	return s
 }
 
 // Enabled returns true if any scanning is configured.
 func (s *Service) Enabled() bool {
+	// No scanner means not enabled - that is the honest answer, and it keeps
+	// a partially constructed Service (metadata-only, as the handler tests
+	// build) from panicking here rather than reporting what it can do.
+	if s.scanner == nil {
+		return false
+	}
 	return s.scanner.MalwareEnabled() || s.scanner.NSFWEnabled()
 }
 
 // ProcessUpload triggers async scanning for a newly uploaded file.
 // This is non-blocking and runs in a goroutine.
-func (s *Service) ProcessUpload(relativePath, absPath, clientCode string, isPublic bool) {
+func (s *Service) ProcessUpload(relativePath, clientCode, sha1 string, isPublic bool) {
 	if !s.Enabled() {
 		return
 	}
@@ -124,11 +178,11 @@ func (s *Service) ProcessUpload(relativePath, absPath, clientCode string, isPubl
 		return
 	}
 
-	go s.scan(relativePath, absPath, clientCode, isPublic)
+	go s.scan(relativePath, clientCode, sha1, isPublic)
 }
 
 // scan performs the actual scanning (called async).
-func (s *Service) scan(relativePath, absPath, clientCode string, isPublic bool) {
+func (s *Service) scan(relativePath, clientCode, sha1 string, isPublic bool) {
 	// Prevent duplicate processing
 	s.mu.Lock()
 	if s.processing[relativePath] {
@@ -144,7 +198,24 @@ func (s *Service) scan(relativePath, absPath, clientCode string, isPublic bool) 
 		s.mu.Unlock()
 	}()
 
-	log.Printf("Starting scan for: %s", relativePath)
+	// A job queued before alerts carried hashes has none. Recompute it now, so
+	// an alert raised on retry can still name the file. Without this the alert
+	// would carry an empty hash and a locator matching every stored file.
+	if sha1 == "" {
+		if f, err := s.openFile(relativePath); err != nil {
+			log.Printf("Could not open %q to hash it for alerting: %v", relativePath, err)
+		} else {
+			h, hErr := fileSHA1(f)
+			f.Close()
+			if hErr != nil {
+				log.Printf("Could not hash %q for alerting: %v", relativePath, hErr)
+			} else {
+				sha1 = h
+			}
+		}
+	}
+
+	log.Printf("Starting scan for: %q", relativePath)
 
 	meta := &Metadata{
 		Status:      StatusPending,
@@ -155,10 +226,10 @@ func (s *Service) scan(relativePath, absPath, clientCode string, isPublic bool) 
 
 	// 1. Malware scan first (faster, security-critical)
 	if s.scanner.MalwareEnabled() {
-		result, err := s.scanner.ScanMalware(absPath)
+		result, err := s.scanMalware(relativePath)
 		if err != nil {
 			scanErr = fmt.Errorf("malware scan: %w", err)
-			log.Printf("Malware scan failed for %s: %v", relativePath, err)
+			log.Printf("Malware scan failed for %q: %v", relativePath, err)
 		} else if result != nil {
 			meta.MalwareResult = &MalwareInfo{
 				Infected:    result.Infected,
@@ -171,20 +242,27 @@ func (s *Service) scan(relativePath, absPath, clientCode string, isPublic bool) 
 				now := time.Now()
 				meta.CompletedAt = &now
 
-				// Delete the file immediately
-				if err := s.deleteFile(relativePath); err != nil {
-					log.Printf("Failed to delete malware file %s: %v", relativePath, err)
-				} else {
-					log.Printf("Deleted malware file: %s (%s)", relativePath, *result.MalwareName)
-				}
-
-				// Save metadata and notify
-				s.saveMetadata(relativePath, meta)
+				// MalwareName is optional in the scanner's response, and it
+				// was dereferenced unguarded by the log line below while the
+				// alert a few lines further down already treated it as
+				// nil-able. scan() runs as a goroutine, so that panic would
+				// have taken the process down - on a malware detection, which
+				// is the worst moment to lose the service. Resolved once, here.
 				malwareName := "unknown"
 				if result.MalwareName != nil {
 					malwareName = *result.MalwareName
 				}
-				s.notifier.MalwareAlert(relativePath, malwareName)
+
+				// Delete the file immediately
+				if err := s.deleteFile(relativePath); err != nil {
+					log.Printf("Failed to delete malware file %q: %v", relativePath, err)
+				} else {
+					log.Printf("Deleted malware file: %q (%q)", relativePath, malwareName)
+				}
+
+				// Save metadata and notify
+				s.saveMetadata(relativePath, meta)
+				s.notifier.MalwareAlert(sha1, scopeOf(isPublic), malwareName)
 				return // Don't continue with NSFW scan
 			}
 		}
@@ -192,10 +270,10 @@ func (s *Service) scan(relativePath, absPath, clientCode string, isPublic bool) 
 
 	// 2. NSFW scan (if malware clean and scanner enabled)
 	if scanErr == nil && s.scanner.NSFWEnabled() {
-		result, err := s.scanner.ScanNSFW(absPath)
+		result, err := s.scanNSFW(relativePath)
 		if err != nil {
 			scanErr = fmt.Errorf("nsfw scan: %w", err)
-			log.Printf("NSFW scan failed for %s: %v", relativePath, err)
+			log.Printf("NSFW scan failed for %q: %v", relativePath, err)
 		} else if result != nil {
 			meta.NSFWResult = &NSFWInfo{
 				Unsafe:          result.Unsafe,
@@ -209,10 +287,10 @@ func (s *Service) scan(relativePath, absPath, clientCode string, isPublic bool) 
 				meta.CompletedAt = &now
 
 				// Don't delete, just flag
-				log.Printf("NSFW content flagged: %s (confidence: %.2f)", relativePath, result.Confidence)
+				log.Printf("NSFW content flagged: %q (confidence: %.2f)", relativePath, result.Confidence)
 
 				s.saveMetadata(relativePath, meta)
-				s.notifier.NSFWAlert(relativePath, result.Confidence, result.DetectedClasses)
+				s.notifier.NSFWAlert(sha1, scopeOf(isPublic), result.Confidence, result.DetectedClasses)
 				return
 			}
 		}
@@ -224,7 +302,7 @@ func (s *Service) scan(relativePath, absPath, clientCode string, isPublic bool) 
 		meta.Status = StatusError
 		meta.Error = &errStr
 		s.saveMetadata(relativePath, meta)
-		s.queueForRetry(relativePath, absPath, clientCode, isPublic, errStr)
+		s.queueForRetry(relativePath, clientCode, sha1, isPublic, errStr)
 		return
 	}
 
@@ -233,7 +311,31 @@ func (s *Service) scan(relativePath, absPath, clientCode string, isPublic bool) 
 	now := time.Now()
 	meta.CompletedAt = &now
 	s.saveMetadata(relativePath, meta)
-	log.Printf("Scan complete (clean): %s", relativePath)
+	log.Printf("Scan complete (clean): %q", relativePath)
+}
+
+// scanMalware and scanNSFW open the stored file through the storage root and
+// stream it to the scanner. Kept together so the open/close pairing lives in
+// one place rather than twice inside scan().
+func (s *Service) scanMalware(relativePath string) (*scanner.MalwareScanResult, error) {
+	f, err := s.openFile(relativePath)
+	if err != nil {
+		// No path in the message: every caller logs it alongside, and this
+		// error also lands in the metadata JSON and the retry queue, where a
+		// second copy of the uploader's filename earns nothing.
+		return nil, fmt.Errorf("open for malware scan: %w", err)
+	}
+	defer f.Close()
+	return s.scanner.ScanMalware(relativePath, f)
+}
+
+func (s *Service) scanNSFW(relativePath string) (*scanner.NSFWResult, error) {
+	f, err := s.openFile(relativePath)
+	if err != nil {
+		return nil, fmt.Errorf("open for nsfw scan: %w", err)
+	}
+	defer f.Close()
+	return s.scanner.ScanNSFW(relativePath, f)
 }
 
 // GetMetadata reads the metadata for a file.
@@ -285,11 +387,11 @@ func (s *Service) metadataPath(relativePath string) string {
 }
 
 // queueForRetry adds a failed scan to the retry queue.
-func (s *Service) queueForRetry(relativePath, absPath, clientCode string, isPublic bool, lastError string) {
+func (s *Service) queueForRetry(relativePath, clientCode, sha1 string, isPublic bool, lastError string) {
 	entry := QueueEntry{
 		RelativePath: relativePath,
-		AbsolutePath: absPath,
 		ClientCode:   clientCode,
+		SHA1:         sha1,
 		IsPublic:     isPublic,
 		QueuedAt:     time.Now(),
 		Retries:      0,
@@ -310,7 +412,7 @@ func (s *Service) queueForRetry(relativePath, absPath, clientCode string, isPubl
 	data, _ := json.MarshalIndent(entry, "", "  ")
 	os.WriteFile(queueFile, data, 0644)
 
-	log.Printf("Queued for retry: %s (attempt %d)", relativePath, entry.Retries+1)
+	log.Printf("Queued for retry: %q (attempt %d)", relativePath, entry.Retries+1)
 }
 
 // processQueue runs in the background and retries failed scans.
@@ -358,18 +460,27 @@ func (s *Service) processQueueOnce() {
 			continue
 		}
 
-		// Check if file still exists
-		if _, err := os.Stat(qe.AbsolutePath); os.IsNotExist(err) {
-			os.Remove(queueFile)
+		// Check the file still exists, through the storage root. Only a
+		// confirmed-missing file drops the job: a transient failure such as a
+		// permission change or descriptor exhaustion must leave it queued, or
+		// a pending malware scan is silently abandoned along with its alert.
+		f, err := s.openFile(qe.RelativePath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				os.Remove(queueFile)
+			} else {
+				log.Printf("Could not open queued file %q, leaving it queued: %v", qe.RelativePath, err)
+			}
 			continue
 		}
+		f.Close()
 
-		log.Printf("Retrying scan for %s (attempt %d)", qe.RelativePath, qe.Retries+1)
+		log.Printf("Retrying scan for %q (attempt %d)", qe.RelativePath, qe.Retries+1)
 
 		// Remove from queue before retry (will be re-added if fails again)
 		os.Remove(queueFile)
 
 		// Retry scan
-		s.scan(qe.RelativePath, qe.AbsolutePath, qe.ClientCode, qe.IsPublic)
+		s.scan(qe.RelativePath, qe.ClientCode, qe.SHA1, qe.IsPublic)
 	}
 }

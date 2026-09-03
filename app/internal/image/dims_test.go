@@ -2,24 +2,19 @@ package image
 
 import (
 	"bytes"
+	"errors"
 	stdimage "image"
 	"image/color"
 	"image/gif"
 	"image/jpeg"
 	"image/png"
-	"os"
-	"path/filepath"
 	"testing"
 )
 
-func writeFixture(t *testing.T, name string, payload []byte) string {
-	t.Helper()
-	dir := t.TempDir()
-	p := filepath.Join(dir, name)
-	if err := os.WriteFile(p, payload, 0o644); err != nil {
-		t.Fatalf("write fixture: %v", err)
-	}
-	return p
+// fixture wraps a payload as the ReadSeeker ProbeDims now takes. No temp file:
+// the open moved to the caller, which does it through the storage root.
+func fixture(payload []byte) *bytes.Reader {
+	return bytes.NewReader(payload)
 }
 
 func encodeJPEG(t *testing.T, w, h int) []byte {
@@ -50,7 +45,7 @@ func encodeGIF(t *testing.T, w, h int) []byte {
 }
 
 func TestProbeDims_JPEG(t *testing.T) {
-	p := writeFixture(t, "f.jpg", encodeJPEG(t, 300, 200))
+	p := fixture(encodeJPEG(t, 300, 200))
 	w, h, err := ProbeDims(p)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
@@ -61,7 +56,7 @@ func TestProbeDims_JPEG(t *testing.T) {
 }
 
 func TestProbeDims_PNG(t *testing.T) {
-	p := writeFixture(t, "f.png", encodePNG(t, 64, 128))
+	p := fixture(encodePNG(t, 64, 128))
 	w, h, _ := ProbeDims(p)
 	if w != 64 || h != 128 {
 		t.Fatalf("dims = %dx%d, want 64x128", w, h)
@@ -69,7 +64,7 @@ func TestProbeDims_PNG(t *testing.T) {
 }
 
 func TestProbeDims_GIF(t *testing.T) {
-	p := writeFixture(t, "f.gif", encodeGIF(t, 10, 20))
+	p := fixture(encodeGIF(t, 10, 20))
 	w, h, _ := ProbeDims(p)
 	if w != 10 || h != 20 {
 		t.Fatalf("dims = %dx%d, want 10x20", w, h)
@@ -81,7 +76,7 @@ func TestProbeDims_SVG_WidthHeight(t *testing.T) {
 <svg xmlns="http://www.w3.org/2000/svg" width="200px" height="50">
   <rect width="200" height="50" fill="red"/>
 </svg>`)
-	p := writeFixture(t, "f.svg", body)
+	p := fixture(body)
 	w, h, _ := ProbeDims(p)
 	if w != 200 || h != 50 {
 		t.Fatalf("dims = %dx%d, want 200x50", w, h)
@@ -90,7 +85,7 @@ func TestProbeDims_SVG_WidthHeight(t *testing.T) {
 
 func TestProbeDims_SVG_ViewBoxFallback(t *testing.T) {
 	body := []byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 100"></svg>`)
-	p := writeFixture(t, "vb.svg", body)
+	p := fixture(body)
 	w, h, _ := ProbeDims(p)
 	if w != 400 || h != 100 {
 		t.Fatalf("dims = %dx%d, want 400x100 (viewBox)", w, h)
@@ -102,7 +97,7 @@ func TestProbeDims_UnknownFormat(t *testing.T) {
 	// not by any of our image decoders. Probe should return 0/0
 	// silently so the caller falls back to form-supplied dims.
 	body := []byte("%PDF-1.4\n%??\n1 0 obj\n<</Type/Catalog>>\nendobj\n")
-	p := writeFixture(t, "f.pdf", body)
+	p := fixture(body)
 	w, h, err := ProbeDims(p)
 	if err != nil {
 		t.Fatalf("probe pdf: %v", err)
@@ -112,8 +107,16 @@ func TestProbeDims_UnknownFormat(t *testing.T) {
 	}
 }
 
-func TestProbeDims_MissingFile(t *testing.T) {
-	if _, _, err := ProbeDims("/no/such/file.jpg"); err == nil {
-		t.Fatalf("expected error for missing file")
+// A read failure is reported rather than swallowed. The missing-file case that
+// used to live here moved out with the open: ProbeDims no longer touches the
+// filesystem, and the callers open through the storage root.
+func TestProbeDims_ReadError(t *testing.T) {
+	if _, _, err := ProbeDims(errReader{}); err == nil {
+		t.Fatalf("expected the read error to be returned")
 	}
 }
+
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error)       { return 0, errors.New("boom") }
+func (errReader) Seek(int64, int) (int64, error) { return 0, errors.New("boom") }

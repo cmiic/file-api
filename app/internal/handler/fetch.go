@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -36,13 +37,37 @@ func NewFetchHandler(s *storage.Storage, maxUploadSize int64, jwtSecret string) 
 		jwtSecret:     []byte(jwtSecret),
 	}
 
+	// The SSRF boundary is the dial guard, not the URL string checks. It runs
+	// after name resolution on every hop, so it sees the address actually being
+	// connected to - which is the only thing a hostname, an unusual IP spelling
+	// or a rebinding DNS answer cannot lie about. Cloned from DefaultTransport
+	// so HTTP/2, connection pooling and its timeouts are unchanged.
+	//
+	// Proxying is disabled deliberately. DefaultTransport honours HTTP_PROXY
+	// and HTTPS_PROXY, and with a proxy in play every request dials the proxy
+	// instead of the target: the guard would approve the proxy's public address
+	// while the proxy went on to resolve and connect to whatever the caller
+	// asked for. That is the whole bypass back again, switched on by an
+	// environment variable. Nothing here needs an egress proxy, so the guard
+	// stays the boundary unconditionally. If one is ever required, the
+	// destination filtering has to move to the proxy - it cannot be done here.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.DialContext = (&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control:   util.SafeDialControl,
+	}).DialContext
+
 	h.httpClient = &http.Client{
-		Timeout: 30 * time.Second,
+		Timeout:   30 * time.Second,
+		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {
 				return fmt.Errorf("too many redirects")
 			}
-			// Re-validate redirect destination to prevent SSRF via open redirect
+			// Cheap pre-filter on the redirect target. The dial guard is what
+			// actually enforces it; this keeps the failure legible.
 			if !util.IsValidURL(req.URL.String()) {
 				return fmt.Errorf("redirect to disallowed URL: %s", req.URL.Host)
 			}
@@ -141,15 +166,18 @@ func (h *FetchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// same fallback rules: probe wins on a recognised format, form
 	// fields win when the probe returns zero.
 	origWidth, origHeight := formOrigWidth, formOrigHeight
-	absPath := h.storage.GetFilePath(info.RelativePath)
-	pw, ph, perr := image.ProbeDims(absPath)
-	if perr != nil {
-		log.Printf("[fetch] probe %s: %v", info.RelativePath, perr)
+	if f, oErr := h.storage.Open(info.RelativePath); oErr != nil {
+		log.Printf("[fetch] open for probe %q: %v", info.RelativePath, oErr)
+	} else {
+		pw, ph, perr := image.ProbeDims(f)
+		f.Close()
+		if perr != nil {
+			log.Printf("[fetch] probe %q: %v", info.RelativePath, perr)
+		}
+		if pw > 0 && ph > 0 {
+			origWidth, origHeight = pw, ph
+		}
 	}
-	if pw > 0 && ph > 0 {
-		origWidth, origHeight = pw, ph
-	}
-
 	metaToken, mErr := auth.Mint(h.jwtSecret, info.RelativePath, info.Size, origWidth, origHeight)
 	if mErr != nil {
 		log.Printf("[fetch] mint meta_token: %v", mErr)

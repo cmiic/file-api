@@ -2,11 +2,13 @@ package handler
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 
 	"file-api/internal/middleware"
 	"file-api/internal/moderation"
+	"file-api/internal/storage"
 )
 
 // MetaHandler handles scan metadata requests.
@@ -37,9 +39,20 @@ func (h *MetaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Extract relative path from URL
 	// /meta/files/2026/1/file.jpg -> 2026/1/file.jpg
-	relativePath := strings.TrimPrefix(r.URL.Path, "/meta/files/")
-	if relativePath == "" {
+	rawPath := strings.TrimPrefix(r.URL.Path, "/meta/files/")
+	if rawPath == "" {
 		http.Error(w, "File path required", http.StatusBadRequest)
+		return
+	}
+
+	// Clean and validate before the path reaches the filesystem.
+	// http.ServeMux only canonicalizes the *escaped* path, so a
+	// percent-encoded traversal (%2e%2e%2f) survives routing and
+	// arrives here decoded in r.URL.Path. Same sanitizer the /files/
+	// handler uses.
+	relativePath, err := storage.SanitizeRequestPath(rawPath)
+	if err != nil {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
 		return
 	}
 
@@ -52,7 +65,10 @@ func (h *MetaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Get metadata
 	meta, err := h.moderation.GetMetadata(relativePath)
 	if err != nil {
-		http.Error(w, "Failed to read metadata: "+err.Error(), http.StatusInternalServerError)
+		// The underlying error carries absolute filesystem paths -
+		// log it, don't hand it to the caller.
+		log.Printf("[meta] read metadata %q: %v", relativePath, err)
+		http.Error(w, "Failed to read metadata", http.StatusInternalServerError)
 		return
 	}
 

@@ -17,7 +17,6 @@ import (
 	_ "image/png"  // register png decoder
 	"io"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 
@@ -26,8 +25,11 @@ import (
 	_ "golang.org/x/image/webp" // register webp decoder
 )
 
-// ProbeDims opens the file at absPath, sniffs its content type, and
-// reads the image header to extract intrinsic width + height.
+// ProbeDims sniffs the content type of f and reads the image header to
+// extract intrinsic width + height.
+//
+// Takes an already-open reader rather than a path: the caller opens through
+// the storage root, so this cannot be pointed at a file outside it.
 //
 // Returns (0, 0, nil) for unrecognised types so a probe failure
 // degrades gracefully — the caller (upload handler) can then fall
@@ -37,13 +39,7 @@ import (
 // file; format-specific decode failures are swallowed (the caller
 // already has bytes on disk and can render with a CSS-only aspect
 // ratio if dims aren't available).
-func ProbeDims(absPath string) (width, height int, err error) {
-	f, err := os.Open(absPath)
-	if err != nil {
-		return 0, 0, err
-	}
-	defer f.Close()
-
+func ProbeDims(f io.ReadSeeker) (width, height int, err error) {
 	head := make([]byte, 512)
 	n, err := io.ReadFull(f, head)
 	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {

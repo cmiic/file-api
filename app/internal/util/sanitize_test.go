@@ -1,7 +1,6 @@
 package util
 
 import (
-	"net"
 	"testing"
 )
 
@@ -39,6 +38,17 @@ func TestIsValidURL(t *testing.T) {
 		{"link-local", "http://169.254.1.1/", false},
 		{"aws metadata", "http://169.254.169.254/latest/meta-data/", false},
 		{"cgnat", "http://100.64.0.1/internal", false},
+
+		// Literal addresses are classified by BlockedIP, so the special-purpose
+		// ranges are rejected here too - the doc comment's "no literal internal
+		// address" has to be true, not aspirational.
+		{"unspecified", "http://0.0.0.0/x", false},
+		{"benchmarking", "http://198.18.0.1/x", false},
+		{"test-net-1", "http://192.0.2.1/x", false},
+		{"reserved", "http://240.0.0.1/x", false},
+		{"nat64 loopback", "http://[64:ff9b::7f00:1]/x", false},
+		{"ipv4-mapped loopback", "http://[::ffff:127.0.0.1]/x", false},
+		{"ipv4-mapped public", "http://[::ffff:8.8.8.8]/x", true},
 
 		// Edge cases
 		{"no host", "http:///path", false},
@@ -118,6 +128,9 @@ func TestIsValidClientCode(t *testing.T) {
 		{"space not allowed", "MY CLIENT", false},
 		{"slash not allowed", "MY/CLIENT", false},
 		{"dot not allowed", "MY.CLIENT", false},
+		{"traversal not allowed", "..", false},
+		{"traversal segment not allowed", "../etc", false},
+		{"newline not allowed", "ACME\nX", false},
 	}
 
 	for _, tt := range tests {
@@ -152,59 +165,6 @@ func TestIsValidRelativePath(t *testing.T) {
 			result := IsValidRelativePath(tt.path)
 			if result != tt.expected {
 				t.Errorf("IsValidRelativePath(%q) = %v, want %v", tt.path, result, tt.expected)
-			}
-		})
-	}
-}
-
-func TestIsPrivateIP(t *testing.T) {
-	tests := []struct {
-		name     string
-		ip       string
-		expected bool
-	}{
-		// Loopback
-		{"loopback ipv4", "127.0.0.1", true},
-		{"loopback ipv4 other", "127.0.0.2", true},
-		{"loopback ipv6", "::1", true},
-
-		// RFC1918 private
-		{"10.x.x.x", "10.0.0.1", true},
-		{"10.255.255.255", "10.255.255.255", true},
-		{"172.16.x.x", "172.16.0.1", true},
-		{"172.31.x.x", "172.31.255.255", true},
-		{"192.168.x.x", "192.168.1.1", true},
-
-		// Link-local
-		{"link-local ipv4", "169.254.1.1", true},
-		{"aws metadata", "169.254.169.254", true},
-		{"link-local ipv6", "fe80::1", true},
-
-		// CGNAT
-		{"cgnat start", "100.64.0.1", true},
-		{"cgnat end", "100.127.255.255", true},
-
-		// Public IPs
-		{"public 8.8.8.8", "8.8.8.8", false},
-		{"public 1.1.1.1", "1.1.1.1", false},
-		{"public 93.x.x.x", "93.184.216.34", false},
-
-		// Edge of private ranges (should be public)
-		{"172.15.x.x public", "172.15.255.255", false},
-		{"172.32.x.x public", "172.32.0.1", false},
-		{"100.63.x.x public", "100.63.255.255", false},
-		{"100.128.x.x public", "100.128.0.1", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ip := net.ParseIP(tt.ip)
-			if ip == nil {
-				t.Fatalf("Failed to parse IP: %s", tt.ip)
-			}
-			result := isPrivateIP(ip)
-			if result != tt.expected {
-				t.Errorf("isPrivateIP(%s) = %v, want %v", tt.ip, result, tt.expected)
 			}
 		})
 	}

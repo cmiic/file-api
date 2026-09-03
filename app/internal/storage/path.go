@@ -9,33 +9,32 @@ import (
 	"time"
 )
 
-// GenerateStoragePath creates the directory path for storing a file.
-// Public files:  {basePath}/{year}/{month}/
-// Private files: {basePath}/cli/{clientCode}/{year}/{month}/
-func GenerateStoragePath(basePath, clientCode string) string {
+// GenerateStorageDir creates the directory a file is stored in, relative to
+// the storage root.
+// Public files:  {year}/{month}
+// Private files: cli/{clientCode}/{year}/{month}
+//
+// Relative rather than absolute because every filesystem operation now goes
+// through an *os.Root anchored at the base directory, and Root methods reject
+// absolute names.
+func GenerateStorageDir(clientCode string) string {
 	now := time.Now()
 	year := strconv.Itoa(now.Year())
 	month := strconv.Itoa(int(now.Month()))
 
 	if clientCode != "" {
-		return filepath.Join(basePath, "cli", clientCode, year, month)
+		return filepath.Join("cli", clientCode, year, month)
 	}
-	return filepath.Join(basePath, year, month)
+	return filepath.Join(year, month)
 }
 
-// GenerateRelativePath creates the relative path (from basePath) for a stored file.
-// This is what gets returned in the API response and stored in the database.
+// GenerateRelativePath creates the relative path (from the storage root) for a
+// stored file. This is what gets returned in the API response and stored in
+// the database.
 // Public files:  {year}/{month}/{filename}
 // Private files: cli/{clientCode}/{year}/{month}/{filename}
 func GenerateRelativePath(clientCode, filename string) string {
-	now := time.Now()
-	year := strconv.Itoa(now.Year())
-	month := strconv.Itoa(int(now.Month()))
-
-	if clientCode != "" {
-		return filepath.Join("cli", clientCode, year, month, filename)
-	}
-	return filepath.Join(year, month, filename)
+	return filepath.Join(GenerateStorageDir(clientCode), filename)
 }
 
 // IsPrivatePath checks if a URL path is for private files.
