@@ -117,7 +117,7 @@ services:
         condition: service_healthy
 
   clamav:
-    image: docker.io/clamav/clamav:stable-debian13-slim@sha256:be3cb41d9833ce9ffb98f3d3e1483c35c0d87060c2bda3624d75fd28bbf0b3bd
+    image: docker.io/clamav/clamav:stable-debian13-slim@sha256:4c975c439fcb7ab9cbdd72162c2802f5efcb4a11dcf5b0b37da1d746474ef20e
     environment:
       CLAMAV_STREAM_MAX_LENGTH: 220M
       CLAMAV_MAX_SCAN_SIZE: 200M
