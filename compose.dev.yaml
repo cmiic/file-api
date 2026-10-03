@@ -91,7 +91,7 @@ services:
         condition: service_healthy
 
   imgproxy:
-    image: docker.io/darthsim/imgproxy:latest@sha256:a41d199926a6416e9a278e75cbdfdfdb0957bf42ee5f3c8f6ec130ea682dcec2
+    image: docker.io/darthsim/imgproxy:v4.0.17@sha256:db0b4b9cd690c8b3590203dea300fb759a18c4ec2af7b37424f0bdef23ce317d
     read_only: true
     security_opt:
       - no-new-privileges:true
@@ -117,7 +117,7 @@ services:
         condition: service_healthy
 
   clamav:
-    image: docker.io/clamav/clamav:stable-debian13-slim@sha256:cc16781fe005e49de6a8fc1231b63b265f74b18fc2a6347c670c35716914c3b6
+    image: docker.io/clamav/clamav:1.5.4-debian13-slim@sha256:9bb8712a50f0e75166e936c452cd82dd5e5be0b85586598930b5bbb84a99a578
     environment:
       CLAMAV_STREAM_MAX_LENGTH: 220M
       CLAMAV_MAX_SCAN_SIZE: 200M
