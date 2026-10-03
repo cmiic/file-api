@@ -1,5 +1,5 @@
 # Stage 1: Build
-FROM docker.io/library/golang:trixie AS builder
+FROM docker.io/library/golang:1.27.1-trixie@sha256:3b77fc618ec235a1ab412de7737f120dd507c57e8d87de4cbb7994fb94275ed5 AS builder
 WORKDIR /app
 
 COPY go.mod ./
@@ -25,7 +25,7 @@ COPY . .
 RUN CGO_ENABLED=0 go build -o pdf-sidecar .
 
 # Stage 2: Production
-FROM docker.io/library/debian:trixie-slim
+FROM docker.io/library/debian:13.7-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
 WORKDIR /app
 
 LABEL org.opencontainers.image.source="https://github.com/cmiic/file-api" \
