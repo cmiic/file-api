@@ -32,7 +32,7 @@ COPY app/ .
 RUN CGO_ENABLED=0 go build -o file-api .
 
 # Stage 2: Production (This is what Podman uses)
-FROM docker.io/library/debian:13.7-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+FROM docker.io/library/debian:13.7-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
 WORKDIR /app
 
 LABEL org.opencontainers.image.source="https://github.com/cmiic/file-api" \
