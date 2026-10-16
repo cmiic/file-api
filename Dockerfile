@@ -1,5 +1,5 @@
 # Stage 1: Build & Development (This is what VS Code uses)
-FROM docker.io/library/golang:1.27.1-trixie@sha256:8f58fd67ea075142d947a60e0caa4317746a55118d312f027793d382c7741734 AS builder
+FROM docker.io/library/golang:1.27.2-trixie@sha256:47667934874913a449b96faa7ef4777fa285d9ec29126ee80ed61c45b7cccf0e AS builder
 WORKDIR /app
 
 # Install dependencies needed for development AND execution
