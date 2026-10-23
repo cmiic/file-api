@@ -56,8 +56,8 @@ RUN groupadd -r pdfsidecar && useradd -r -g pdfsidecar pdfsidecar
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
-    poppler-utils \
     poppler-data \
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/pdf-sidecar .
