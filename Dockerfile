@@ -34,10 +34,11 @@ RUN CGO_ENABLED=0 go build -ldflags "-X main.version=${APP_VERSION}" -o file-api
 
 # Development: the builder plus Air for live reloading, which .devcontainer
 # targets. Release and CI builds target the final stage and never build this
-# one, so they download nothing for it. Air is pinned by version; go install
-# verifies the module against the Go checksum database.
+# one, so they download nothing for it. Air comes from the tools module, whose
+# go.sum locks it and every dependency.
 FROM builder AS dev
-RUN go install github.com/air-verse/air@v1.67.4
+COPY tools/go.mod tools/go.sum /tools/
+RUN go -C /tools install tool
 
 # Stage 2: Production (This is what Podman uses)
 FROM docker.io/library/debian:13.7-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
