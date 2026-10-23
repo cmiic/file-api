@@ -3,9 +3,7 @@ package handler
 import (
 	"mime"
 	"net/http"
-	"os"
 	"path/filepath"
-	"strings"
 
 	"file-api/internal/middleware"
 	"file-api/internal/storage"
@@ -35,7 +33,7 @@ func NewServeHandler(s *storage.Storage) *ServeHandler {
 	return &ServeHandler{storage: s}
 }
 
-// ServeHTTP handles GET /files/* requests.
+// ServeHTTP handles GET and HEAD /files/* requests.
 func (h *ServeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -47,73 +45,23 @@ func (h *ServeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'")
 	w.Header().Set("X-Frame-Options", "DENY")
 
-	// Extract and sanitize the file path
-	path := strings.TrimPrefix(r.URL.Path, "/files/")
-	path = strings.TrimPrefix(path, "/files")
-
-	// Sanitize path
-	sanitizedPath, err := storage.SanitizeRequestPath(path)
-	if err != nil {
-		http.Error(w, "Invalid path", http.StatusBadRequest)
+	path, ok := requestFilePath(r.URL.Path)
+	if !ok {
+		http.Error(w, msgInvalidPath, http.StatusBadRequest)
 		return
 	}
-
-	// Check if this is a private path
-	isPrivate := storage.IsPrivatePath(sanitizedPath)
-	if isPrivate {
-		// Require JWT authentication
-		claims := middleware.GetClaims(r)
-		if claims == nil {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		// Extract and verify client code
-		requestedClientCode := storage.ExtractClientCode(sanitizedPath)
-		if requestedClientCode != "" && claims.ClientCode != requestedClientCode {
-			http.Error(w, "Forbidden", http.StatusForbidden)
-			return
-		}
+	if status := authorizeClientPath(middleware.GetClaims(r), path); status != 0 {
+		http.Error(w, http.StatusText(status), status)
+		return
 	}
 
 	// Stat through the storage root: a name that escapes it fails here rather
 	// than reaching the filesystem.
-	info, err := h.storage.Stat(sanitizedPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			http.Error(w, "Not Found", http.StatusNotFound)
-		} else {
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		}
+	info, ok := statRegularFile(w, h.storage, path, "[serve]")
+	if !ok {
 		return
 	}
-
-	// Don't serve directories
-	if info.IsDir() {
-		http.Error(w, "Not Found", http.StatusNotFound)
-		return
-	}
-
-	// Set cache headers only after confirming file exists
-	if isPrivate {
-		w.Header().Set("Cache-Control", "private, no-store")
-	} else {
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-	}
-
-	// Set content type based on extension
-	ext := filepath.Ext(sanitizedPath)
-	contentType := mime.TypeByExtension(ext)
-	if contentType != "" {
-		w.Header().Set("Content-Type", contentType)
-	}
-
-	// Force download for non-safe content types to prevent XSS
-	// Safe types (images, video, audio, PDF) can render inline
-	if !safeInlineTypes[contentType] {
-		filename := filepath.Base(sanitizedPath)
-		w.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
-	}
+	setContentHeaders(w, path, storage.IsPrivatePath(path))
 
 	// Serve the file through the storage root.
 	//
@@ -121,21 +69,38 @@ func (h *ServeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// itself, outside the root, which would give up the guarantee this handler
 	// just established by statting through it. ServeContent takes the open
 	// file and still provides Range and conditional-request handling.
-	f, err := h.storage.Open(sanitizedPath)
+	f, err := h.storage.Open(path)
 	if err != nil {
-		// Same split as the Stat above: a file that vanished between the two
-		// calls is a 404, anything else is a server-side failure and should
-		// not be reported as though the file simply is not there.
-		if os.IsNotExist(err) {
-			http.Error(w, "Not Found", http.StatusNotFound)
-		} else {
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		}
+		// A file that vanished since the Stat is a 404; anything else is a
+		// server-side failure, not reported as though the file were absent.
+		writeFileError(w, err, "[serve]", "open", path)
 		return
 	}
 	defer f.Close()
 
-	http.ServeContent(w, r, sanitizedPath, info.ModTime(), f)
+	http.ServeContent(w, r, path, info.ModTime(), f)
+}
+
+// setContentHeaders sets caching, type and disposition for a file that exists
+// and is about to be served. Only called once the file is known to exist, so a
+// 404 never carries a year-long public cache header.
+func setContentHeaders(w http.ResponseWriter, path string, private bool) {
+	if private {
+		w.Header().Set("Cache-Control", "private, no-store")
+	} else {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	}
+
+	contentType := mime.TypeByExtension(filepath.Ext(path))
+	if contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	}
+
+	// Force download for non-safe content types to prevent XSS. Safe types
+	// (images, video, audio, PDF) can render inline.
+	if !safeInlineTypes[contentType] {
+		w.Header().Set("Content-Disposition", "attachment; filename=\""+filepath.Base(path)+"\"")
+	}
 }
 
 // HealthHandler provides a health check endpoint.

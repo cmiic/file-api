@@ -3,8 +3,6 @@ package handler
 import (
 	"log"
 	"net/http"
-	"os"
-	"strings"
 	"time"
 
 	"file-api/internal/middleware"
@@ -58,40 +56,20 @@ func (h *DeleteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Same prefix handling and sanitizer as the serve handler, so a path
+	// Same path resolution and client check as the serve handler, so a path
 	// that cannot be read cannot be deleted either.
-	path := strings.TrimPrefix(r.URL.Path, "/files/")
-	path = strings.TrimPrefix(path, "/files")
-	sanitizedPath, err := storage.SanitizeRequestPath(path)
-	// The sanitizer lets a leading slash through (an encoded "%2fetc/passwd"
-	// arrives decoded as "/etc/passwd"). The storage root would refuse it,
-	// but with a containment error rather than not-exist, which the branches
-	// below would report as a 500. Absolute is simply not a valid request.
-	if err != nil || strings.HasPrefix(sanitizedPath, "/") {
-		http.Error(w, "Invalid path", http.StatusBadRequest)
+	path, ok := requestFilePath(r.URL.Path)
+	if !ok {
+		http.Error(w, msgInvalidPath, http.StatusBadRequest)
+		return
+	}
+	if status := authorizeClientPath(claims, path); status != 0 {
+		http.Error(w, http.StatusText(status), status)
 		return
 	}
 
-	if storage.IsPrivatePath(sanitizedPath) {
-		requestedClientCode := storage.ExtractClientCode(sanitizedPath)
-		if requestedClientCode == "" || claims.ClientCode != requestedClientCode {
-			http.Error(w, "Forbidden", http.StatusForbidden)
-			return
-		}
-	}
-
-	info, err := h.storage.Stat(sanitizedPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			http.Error(w, "Not Found", http.StatusNotFound)
-		} else {
-			log.Printf("[delete] stat %q: %v", sanitizedPath, err)
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		}
-		return
-	}
-	if info.IsDir() {
-		http.Error(w, "Not Found", http.StatusNotFound)
+	info, ok := statRegularFile(w, h.storage, path, "[delete]")
+	if !ok {
 		return
 	}
 
@@ -104,26 +82,21 @@ func (h *DeleteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.storage.DeleteFile(sanitizedPath); err != nil {
-		if os.IsNotExist(err) {
-			// Vanished between Stat and Remove; the outcome the caller asked
-			// for is nevertheless true, but it was not this request's doing.
-			http.Error(w, "Not Found", http.StatusNotFound)
-		} else {
-			log.Printf("[delete] remove %q: %v", sanitizedPath, err)
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		}
+	// A file that vanished between Stat and Remove answers 404: the outcome
+	// the caller asked for is true, but it was not this request's doing.
+	if err := h.storage.DeleteFile(path); err != nil {
+		writeFileError(w, err, "[delete]", "remove", path)
 		return
 	}
 
 	if h.moderation != nil {
-		if err := h.moderation.MarkDeleted(sanitizedPath); err != nil {
+		if err := h.moderation.MarkDeleted(path); err != nil {
 			// The file is gone either way; a stale metadata record is worth
 			// a log line, not a failed response.
-			log.Printf("[delete] mark metadata deleted %q: %v", sanitizedPath, err)
+			log.Printf("[delete] mark metadata deleted %q: %v", path, err)
 		}
 	}
 
-	log.Printf("[delete] removed %q (age %s)", sanitizedPath, time.Since(info.ModTime()).Round(time.Second))
+	log.Printf("[delete] removed %q (age %s)", path, time.Since(info.ModTime()).Round(time.Second))
 	w.WriteHeader(http.StatusNoContent)
 }
