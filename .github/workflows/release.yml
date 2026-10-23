@@ -68,6 +68,12 @@ jobs:
         env:
           TAG: ${{ steps.release_tag.outputs.tag }}
           SYFT_IMAGE: docker.io/anchore/syft:v1.55.0@sha256:4cc92b64ca74ffca4c94d4c8fcc01f217731375300be14d0b6eeb2e82eaa110a
+          # The GHCR login above configures only the runner's Docker client;
+          # syft reads its registry credentials from these instead, so the scan
+          # keeps working should the packages ever become private.
+          SYFT_REGISTRY_AUTH_AUTHORITY: ghcr.io
+          SYFT_REGISTRY_AUTH_USERNAME: ${{ github.actor }}
+          SYFT_REGISTRY_AUTH_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # syft's image runs as its own user, which must be able to write here.
@@ -76,7 +82,11 @@ jobs:
           sbom() {
             local image="$1" digest
             digest="$(docker buildx imagetools inspect "${image}:${TAG}" --format '{{.Manifest.Digest}}')"
-            docker run --rm -v "$RUNNER_TEMP/sbom:/out" "$SYFT_IMAGE" scan "registry:${image}@${digest}" \
+            # -e NAME passes the variable through without putting the token on
+            # the command line.
+            docker run --rm -v "$RUNNER_TEMP/sbom:/out" \
+              -e SYFT_REGISTRY_AUTH_AUTHORITY -e SYFT_REGISTRY_AUTH_USERNAME -e SYFT_REGISTRY_AUTH_PASSWORD \
+              "$SYFT_IMAGE" scan "registry:${image}@${digest}" \
               --source-name "$image" --source-version "$TAG" \
               -o "spdx-json=/out/${image##*/}-${TAG}.spdx.json"
           }
