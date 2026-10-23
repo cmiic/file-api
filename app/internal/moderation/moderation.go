@@ -26,6 +26,10 @@ const (
 	StatusFlagged Status = "flagged"
 	StatusMalware Status = "malware"
 	StatusError   Status = "error"
+	// StatusDeleted marks a file removed through the DELETE endpoint. Written
+	// so that a consumer polling for a verdict before persisting its own
+	// record sees that the file is gone rather than a stale "clean".
+	StatusDeleted Status = "deleted"
 )
 
 // Metadata contains scan results for a file.
@@ -306,12 +310,54 @@ func (s *Service) scan(relativePath, clientCode, sha1 string, isPublic bool) {
 		return
 	}
 
-	// All clean
+	// All clean. Unless the file was deleted while the scan ran: the scanners
+	// held it open, so they finished on bytes that are no longer stored, and
+	// writing "clean" here would overwrite the "deleted" record MarkDeleted
+	// left behind.
+	if s.fileGone(relativePath) {
+		log.Printf("Scan complete but file was deleted meanwhile, keeping deleted record: %q", relativePath)
+		return
+	}
 	meta.Status = StatusClean
 	now := time.Now()
 	meta.CompletedAt = &now
 	s.saveMetadata(relativePath, meta)
 	log.Printf("Scan complete (clean): %q", relativePath)
+}
+
+// fileGone reports whether the stored file is confirmed missing. Only a
+// definite not-exist counts; a transient open failure must not be mistaken
+// for a deletion.
+func (s *Service) fileGone(relativePath string) bool {
+	if s.openFile == nil {
+		return false
+	}
+	f, err := s.openFile(relativePath)
+	if err != nil {
+		return os.IsNotExist(err)
+	}
+	f.Close()
+	return false
+}
+
+// MarkDeleted records that the file was removed through the DELETE endpoint.
+// Existing scan results are kept alongside the new status so the record still
+// says what was known about the file; only status and completion time change.
+// A file that never had metadata (moderation off at upload time, or a private
+// upload, which is not scanned) gets a fresh record so the metadata endpoint
+// answers consistently.
+func (s *Service) MarkDeleted(relativePath string) error {
+	meta, err := s.GetMetadata(relativePath)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	if meta == nil {
+		meta = &Metadata{RequestedAt: now}
+	}
+	meta.Status = StatusDeleted
+	meta.CompletedAt = &now
+	return s.saveMetadata(relativePath, meta)
 }
 
 // scanMalware and scanNSFW open the stored file through the storage root and

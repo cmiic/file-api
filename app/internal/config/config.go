@@ -2,10 +2,12 @@
 package config
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // MinJWTSecretLen is the minimum required length for JWT secrets.
@@ -25,6 +27,10 @@ type Config struct {
 	// Limits
 	MaxUploadSize  int64
 	MaxFilenameLen int
+
+	// Deletion. Zero disables the DELETE /files/ route entirely; a positive
+	// duration enables it and bounds how old a file may be when it is deleted.
+	DeleteMaxAge time.Duration
 
 	// Moderation - Scanners
 	MalwareScannerURL string // e.g., http://malware-scanner:8081
@@ -55,12 +61,21 @@ func Load() *Config {
 		log.Fatalf("FATAL: JWT secret must be at least %d characters (got %d)", MinJWTSecretLen, len(jwtSecret))
 	}
 
+	deleteMaxAge, err := parseDeleteMaxAge(os.Getenv("DELETE_MAX_AGE"))
+	if err != nil {
+		// Fail fast rather than fall back: a typo here must not silently
+		// disable deletion (the app would then get 405s it does not expect)
+		// nor silently widen the window.
+		log.Fatalf("FATAL: %v", err)
+	}
+
 	return &Config{
 		Port:           getEnv("PORT", "8080"),
 		BasePath:       getEnv("BASE_PATH", "/data/files"),
 		JWTSecret:      jwtSecret,
 		MaxUploadSize:  getEnvInt64("MAX_UPLOAD_SIZE", 200*1024*1024), // 200MB
 		MaxFilenameLen: getEnvInt("MAX_FILENAME_LEN", 60),
+		DeleteMaxAge:   deleteMaxAge,
 
 		// Moderation - Scanners (empty = disabled)
 		MalwareScannerURL: getEnv("MALWARE_SCANNER_URL", ""),
@@ -77,6 +92,26 @@ func Load() *Config {
 		SMTPFrom:    getEnv("SMTP_FROM", "file-api@localhost"),
 		AlertEmails: getEnv("ALERT_EMAILS", ""),
 	}
+}
+
+// parseDeleteMaxAge interprets the DELETE_MAX_AGE variable. Empty means
+// deletion is disabled, which is the default and the historical behavior.
+// Anything else must be a positive Go duration such as "30m" or "24h"; a
+// value that does not parse, or is zero or negative, is an error so that
+// Load can refuse to start.
+func parseDeleteMaxAge(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("DELETE_MAX_AGE %q is not a duration (use e.g. 30m or 24h): %w", raw, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("DELETE_MAX_AGE %q must be positive; unset it to disable deletion", raw)
+	}
+	return d, nil
 }
 
 // getSecret reads a secret from env var or file path (for container secrets).
