@@ -218,142 +218,189 @@ func (s *Service) ProcessUpload(relativePath, clientCode, sha1 string, isPublic 
 	go s.scan(relativePath, clientCode, sha1, isPublic)
 }
 
-// scan performs the actual scanning (called async).
+// scanJob is one file to scan and what an alert about it may say.
+type scanJob struct {
+	path       string
+	clientCode string
+	sha1       string
+	isPublic   bool
+}
+
+// scan runs the configured scanners over one stored file and records the
+// verdict (called async). Malware goes first: it is the faster check and the
+// one that removes the file. The media screener runs only on a file the
+// malware scan cleared. A scanner error records the failure and queues a
+// retry; a file already being scanned is left to that scan.
 func (s *Service) scan(relativePath, clientCode, sha1 string, isPublic bool) {
-	// Prevent duplicate processing
-	s.mu.Lock()
-	if s.processing[relativePath] {
-		s.mu.Unlock()
+	if !s.claim(relativePath) {
 		return
 	}
-	s.processing[relativePath] = true
-	s.mu.Unlock()
+	defer s.release(relativePath)
 
-	defer func() {
-		s.mu.Lock()
-		delete(s.processing, relativePath)
-		s.mu.Unlock()
-	}()
-
-	// A job queued before alerts carried hashes has none. Recompute it now, so
-	// an alert raised on retry can still name the file. Without this the alert
-	// would carry an empty hash and a locator matching every stored file.
-	if sha1 == "" {
-		if f, err := s.openFile(relativePath); err != nil {
-			log.Printf("Could not open %q to hash it for alerting: %v", relativePath, err)
-		} else {
-			h, hErr := fileSHA1(f)
-			f.Close()
-			if hErr != nil {
-				log.Printf("Could not hash %q for alerting: %v", relativePath, hErr)
-			} else {
-				sha1 = h
-			}
-		}
-	}
+	job := scanJob{path: relativePath, clientCode: clientCode, isPublic: isPublic}
+	job.sha1 = s.ensureSHA1(relativePath, sha1)
 
 	log.Printf("Starting scan for: %q", relativePath)
+	meta := &Metadata{Status: StatusPending, RequestedAt: time.Now()}
 
-	meta := &Metadata{
-		Status:      StatusPending,
-		RequestedAt: time.Now(),
-	}
-
-	var scanErr error
-
-	// 1. Malware scan first (faster, security-critical)
-	if s.scanner.MalwareEnabled() {
-		result, err := s.scanMalware(relativePath)
+	if done, err := s.checkMalware(job, meta); done || err != nil {
 		if err != nil {
-			scanErr = fmt.Errorf("malware scan: %w", err)
-			log.Printf("Malware scan failed for %q: %v", relativePath, err)
-		} else if result != nil {
-			meta.MalwareResult = &MalwareInfo{
-				Infected:    result.Infected,
-				MalwareName: result.MalwareName,
-				ScanTimeMS:  result.ScanTimeMS,
-			}
-
-			if result.Infected {
-				meta.Status = StatusMalware
-				now := time.Now()
-				meta.CompletedAt = &now
-
-				// MalwareName is optional in the scanner's response, and it
-				// was dereferenced unguarded by the log line below while the
-				// alert a few lines further down already treated it as
-				// nil-able. scan() runs as a goroutine, so that panic would
-				// have taken the process down - on a malware detection, which
-				// is the worst moment to lose the service. Resolved once, here.
-				malwareName := "unknown"
-				if result.MalwareName != nil {
-					malwareName = *result.MalwareName
-				}
-
-				// Delete the file immediately
-				if err := s.deleteFile(relativePath); err != nil {
-					log.Printf("Failed to delete malware file %q: %v", relativePath, err)
-				} else {
-					log.Printf("Deleted malware file: %q (%q)", relativePath, malwareName)
-				}
-
-				// Save metadata and notify
-				s.saveScanResult(relativePath, meta)
-				s.notifier.MalwareAlert(sha1, scopeOf(isPublic), malwareName)
-				return // Don't continue with NSFW scan
-			}
-		}
-	}
-
-	// 2. NSFW scan (if malware clean and scanner enabled)
-	if scanErr == nil && s.scanner.NSFWEnabled() {
-		result, err := s.scanNSFW(relativePath)
-		if err != nil {
-			scanErr = fmt.Errorf("nsfw scan: %w", err)
-			log.Printf("NSFW scan failed for %q: %v", relativePath, err)
-		} else if result != nil {
-			meta.NSFWResult = &NSFWInfo{
-				Unsafe:          result.Unsafe,
-				Confidence:      result.Confidence,
-				DetectedClasses: result.DetectedClasses,
-			}
-
-			if result.Unsafe {
-				meta.Status = StatusFlagged
-				now := time.Now()
-				meta.CompletedAt = &now
-
-				// Don't delete, just flag
-				log.Printf("NSFW content flagged: %q (confidence: %.2f)", relativePath, result.Confidence)
-
-				s.saveScanResult(relativePath, meta)
-				s.notifier.NSFWAlert(sha1, scopeOf(isPublic), result.Confidence, result.DetectedClasses)
-				return
-			}
-		}
-	}
-
-	// Handle errors - queue for retry. A failure caused by the file having
-	// been deleted mid-scan (the second scanner cannot open it) is not
-	// retried: the record is already the tombstone, and there is nothing
-	// left to scan.
-	if scanErr != nil {
-		errStr := scanErr.Error()
-		meta.Status = StatusError
-		meta.Error = &errStr
-		if s.saveScanResult(relativePath, meta) {
-			s.queueForRetry(relativePath, clientCode, sha1, isPublic, errStr)
+			s.recordScanError(job, meta, err)
 		}
 		return
 	}
-
-	// All clean
-	meta.Status = StatusClean
-	now := time.Now()
-	meta.CompletedAt = &now
-	if s.saveScanResult(relativePath, meta) {
-		log.Printf("Scan complete (clean): %q", relativePath)
+	if done, err := s.checkNSFW(job, meta); done || err != nil {
+		if err != nil {
+			s.recordScanError(job, meta, err)
+		}
+		return
 	}
+	s.recordClean(job, meta)
+}
+
+// claim marks relativePath as being scanned, or reports that another scan of
+// it is already running.
+func (s *Service) claim(relativePath string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.processing[relativePath] {
+		return false
+	}
+	s.processing[relativePath] = true
+	return true
+}
+
+func (s *Service) release(relativePath string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.processing, relativePath)
+}
+
+// ensureSHA1 returns sha1, or recomputes it from the stored file when it is
+// empty. A job queued before alerts carried hashes has none, and without this
+// an alert raised on retry would carry an empty hash and a locator matching
+// every stored file. A failure is logged and leaves the hash empty.
+func (s *Service) ensureSHA1(relativePath, sha1 string) string {
+	if sha1 != "" {
+		return sha1
+	}
+	f, err := s.openFile(relativePath)
+	if err != nil {
+		log.Printf("Could not open %q to hash it for alerting: %v", relativePath, err)
+		return ""
+	}
+	defer f.Close()
+	h, err := fileSHA1(f)
+	if err != nil {
+		log.Printf("Could not hash %q for alerting: %v", relativePath, err)
+		return ""
+	}
+	return h
+}
+
+// checkMalware runs the malware scan, if configured, and adds its result to
+// meta. done reports a final verdict: the file was infected and has been
+// deleted, recorded and alerted.
+func (s *Service) checkMalware(job scanJob, meta *Metadata) (done bool, err error) {
+	if !s.scanner.MalwareEnabled() {
+		return false, nil
+	}
+	result, err := s.scanMalware(job.path)
+	if err != nil {
+		log.Printf("Malware scan failed for %q: %v", job.path, err)
+		return false, fmt.Errorf("malware scan: %w", err)
+	}
+	if result == nil {
+		return false, nil
+	}
+	meta.MalwareResult = &MalwareInfo{
+		Infected:    result.Infected,
+		MalwareName: result.MalwareName,
+		ScanTimeMS:  result.ScanTimeMS,
+	}
+	if !result.Infected {
+		return false, nil
+	}
+	s.handleInfected(job, meta, malwareName(result))
+	return true, nil
+}
+
+// malwareName is the scanner's name for what it found, or "unknown": the name
+// is optional in the scanner's response.
+func malwareName(result *scanner.MalwareScanResult) string {
+	if result.MalwareName == nil {
+		return "unknown"
+	}
+	return *result.MalwareName
+}
+
+// handleInfected deletes an infected file immediately, records the verdict
+// and alerts the operators.
+func (s *Service) handleInfected(job scanJob, meta *Metadata, name string) {
+	complete(meta, StatusMalware)
+	if err := s.deleteFile(job.path); err != nil {
+		log.Printf("Failed to delete malware file %q: %v", job.path, err)
+	} else {
+		log.Printf("Deleted malware file: %q (%q)", job.path, name)
+	}
+	s.saveScanResult(job.path, meta)
+	s.notifier.MalwareAlert(job.sha1, scopeOf(job.isPublic), name)
+}
+
+// checkNSFW runs the media screener, if configured, and adds its result to
+// meta. done reports a final verdict: the file was flagged, recorded and
+// alerted. A flagged file is kept for review, not deleted.
+func (s *Service) checkNSFW(job scanJob, meta *Metadata) (done bool, err error) {
+	if !s.scanner.NSFWEnabled() {
+		return false, nil
+	}
+	result, err := s.scanNSFW(job.path)
+	if err != nil {
+		log.Printf("NSFW scan failed for %q: %v", job.path, err)
+		return false, fmt.Errorf("nsfw scan: %w", err)
+	}
+	if result == nil {
+		return false, nil
+	}
+	meta.NSFWResult = &NSFWInfo{
+		Unsafe:          result.Unsafe,
+		Confidence:      result.Confidence,
+		DetectedClasses: result.DetectedClasses,
+	}
+	if !result.Unsafe {
+		return false, nil
+	}
+	complete(meta, StatusFlagged)
+	log.Printf("NSFW content flagged: %q (confidence: %.2f)", job.path, result.Confidence)
+	s.saveScanResult(job.path, meta)
+	s.notifier.NSFWAlert(job.sha1, scopeOf(job.isPublic), result.Confidence, result.DetectedClasses)
+	return true, nil
+}
+
+// recordScanError records a failed scan and queues it for retry. A failure
+// caused by the file having been deleted mid-scan is not retried: the record
+// is already the deleted one and saveScanResult refuses to replace it.
+func (s *Service) recordScanError(job scanJob, meta *Metadata, scanErr error) {
+	errStr := scanErr.Error()
+	meta.Status = StatusError
+	meta.Error = &errStr
+	if s.saveScanResult(job.path, meta) {
+		s.queueForRetry(job.path, job.clientCode, job.sha1, job.isPublic, errStr)
+	}
+}
+
+func (s *Service) recordClean(job scanJob, meta *Metadata) {
+	complete(meta, StatusClean)
+	if s.saveScanResult(job.path, meta) {
+		log.Printf("Scan complete (clean): %q", job.path)
+	}
+}
+
+// complete sets the final status and its completion time.
+func complete(meta *Metadata, status Status) {
+	now := time.Now()
+	meta.Status = status
+	meta.CompletedAt = &now
 }
 
 // saveScanResult writes a scan outcome unless the file was deleted while the

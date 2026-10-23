@@ -4,6 +4,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -277,5 +278,32 @@ func TestScanWithOnlyOneScannerEnabled(t *testing.T) {
 
 	if m := f.meta(t); m.Status != StatusClean || m.MalwareResult != nil {
 		t.Errorf("unexpected record %+v", m)
+	}
+}
+
+func TestScanInfectedStillRecordsAndAlertsWhenDeleteFails(t *testing.T) {
+	name := "X"
+	f := newScanFixture(t, &fakeScanner{handler: answer(scanner.MalwareScanResult{Infected: true, MalwareName: &name})}, nil)
+	f.svc.deleteFile = func(string) error { return errors.New("read-only file system") }
+	f.scan()
+
+	if m := f.meta(t); m.Status != StatusMalware {
+		t.Errorf("record %q, want malware even though the delete failed", m.Status)
+	}
+	if len(f.alerts.malware) != 1 {
+		t.Errorf("malware alerts %v, want one", f.alerts.malware)
+	}
+}
+
+func TestEnsureSHA1(t *testing.T) {
+	f := newScanFixture(t, nil, nil)
+	if got := f.svc.ensureSHA1(f.path, "given"); got != "given" {
+		t.Errorf("a given hash is kept, got %q", got)
+	}
+	if got := f.svc.ensureSHA1(f.path, ""); got != f.sha1 {
+		t.Errorf("recomputed %q, want %q", got, f.sha1)
+	}
+	if got := f.svc.ensureSHA1("2026/1/missing.jpg", ""); got != "" {
+		t.Errorf("a file that cannot be opened leaves the hash empty, got %q", got)
 	}
 }
