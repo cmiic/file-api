@@ -2,14 +2,9 @@
 package handler
 
 import (
-	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
-	"strconv"
 
-	"file-api/internal/auth"
-	"file-api/internal/image"
 	"file-api/internal/middleware"
 	"file-api/internal/moderation"
 	"file-api/internal/storage"
@@ -123,14 +118,9 @@ func (h *UploadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// Fallback dimensions from form fields. These remain the source
-	// of truth ONLY when the server-side probe can't recognise the
-	// format (e.g. a brand-new image type stdlib doesn't decode).
-	// Clients that don't supply them simply get 0/0 in that case.
-	formOrigWidth, _ := strconv.Atoi(r.FormValue("orig_width"))
-	formOrigHeight, _ := strconv.Atoi(r.FormValue("orig_height"))
-	thumbWidth, _ := strconv.Atoi(r.FormValue("thumb_width"))
-	thumbHeight, _ := strconv.Atoi(r.FormValue("thumb_height"))
+	// Dimensions posted with the upload: a fallback for formats the probe
+	// cannot read, and pass-through thumbnail values.
+	dims := readFormDims(r)
 
 	// Store the file
 	info, err := h.storage.StoreFile(file, header.Filename, clientCode)
@@ -139,52 +129,16 @@ func (h *UploadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Probe dims server-side from the persisted bytes. Probe errors
-	// only get logged — they never fail the upload, and the form
-	// fallback covers the response.
-	origWidth, origHeight := formOrigWidth, formOrigHeight
-	if f, oErr := h.storage.Open(info.RelativePath); oErr != nil {
-		log.Printf("[upload] open for probe %q: %v", info.RelativePath, oErr)
-	} else {
-		pw, ph, perr := image.ProbeDims(f)
-		f.Close()
-		if perr != nil {
-			log.Printf("[upload] probe %q: %v", info.RelativePath, perr)
-		}
-		if pw > 0 && ph > 0 {
-			origWidth, origHeight = pw, ph
-		}
-	}
-	// Mint the meta_token so downstream backends can verify the
-	// dims weren't tampered with after they left this process.
-	// Errors are logged + the response goes out without the field;
-	// strict backends (e.g. web-api) will then 400.
-	metaToken, mErr := auth.Mint(h.jwtSecret, info.RelativePath, info.Size, origWidth, origHeight)
-	if mErr != nil {
-		log.Printf("[upload] mint meta_token: %v", mErr)
-	}
+	// Probe dims server-side from the persisted bytes; the form values only
+	// stand in when the format is not recognised.
+	dims.origWidth, dims.origHeight = probeStoredDims(h.storage, info.RelativePath, dims.origWidth, dims.origHeight, "[upload]")
 
 	// Trigger async moderation scan for public uploads
-	isPublic := clientCode == ""
 	if h.moderation != nil {
-		h.moderation.ProcessUpload(info.RelativePath, clientCode, info.SHA1, isPublic)
+		h.moderation.ProcessUpload(info.RelativePath, clientCode, info.SHA1, clientCode == "")
 	}
 
-	// Build response
-	response := UploadResponse{
-		Orig: OrigInfo{
-			Name:        info.RelativePath,
-			Size:        info.Size,
-			OrigWidth:   origWidth,
-			OrigHeight:  origHeight,
-			ThumbWidth:  thumbWidth,
-			ThumbHeight: thumbHeight,
-		},
-		MetaToken: metaToken,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	writeStoredResponse(w, h.jwtSecret, info, dims, "[upload]")
 }
 
 // extractClientCode extracts the client code from a URL path.
