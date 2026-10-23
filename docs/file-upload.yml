@@ -13,7 +13,11 @@ info:
     <br><br>
     **Image Resizing:** Use `/files-rs/` endpoints for on-demand resizing via imgproxy. Original files
     are stored once; thumbnails are generated on request.
-  version: "3.0"
+    <br><br>
+    **Deletion:** Off by default. When the operator sets `DELETE_MAX_AGE`, `DELETE /files/...` removes a
+    file younger than that duration for a token carrying the `delete` scope. Older files and all files
+    on a deployment without `DELETE_MAX_AGE` cannot be deleted through the API.
+  version: "3.1"
   contact:
     name: Christoph Stadlbauer
     email: c@miic.at
@@ -32,7 +36,9 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
-      description: JWT token with claims `cli_code` (for private files) and `scopes` (e.g., ["upload", "read"])
+      description: >-
+        JWT token with claims `cli_code` (for private files) and `scopes`. Scopes in use are `upload` for uploads and
+        URL fetches, `delete` for the opt-in delete endpoint, and `scan:read` for scan metadata.
     cookieAuth:
       type: apiKey
       in: cookie
@@ -47,6 +53,10 @@ components:
       description: Invalid request - check response body for error message
     NotFound:
       description: File not found
+    DeleteDisabled:
+      description: Deletion is not enabled on this deployment (`DELETE_MAX_AGE` unset)
+    Deleted:
+      description: File removed. Reverse-proxy and imgproxy caches are not purged and may keep serving it until their validity runs out.
     FileTooLarge:
       description: File exceeds maximum upload size (200MB)
   parameters:
@@ -150,6 +160,31 @@ paths:
                 format: binary
         "404":
           $ref: "#/components/responses/NotFound"
+    delete:
+      summary: Delete public file
+      description: >-
+        Remove a recently uploaded public file. Requires JWT with `delete` scope, and the file must be younger than
+        the deployment's `DELETE_MAX_AGE`, measured from its first upload. An older file answers `403` with the body
+        `Forbidden: deletion window elapsed`. Deployments without `DELETE_MAX_AGE` do not register this operation and
+        answer `405`.
+      tags:
+        - Files
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      responses:
+        "204":
+          $ref: "#/components/responses/Deleted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/UnauthorizedError"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/DeleteDisabled"
 
   /files/cli/{CLI_CODE}/{relative_file_path}:
     parameters:
@@ -184,6 +219,31 @@ paths:
           $ref: "#/components/responses/ForbiddenError"
         "404":
           $ref: "#/components/responses/NotFound"
+    delete:
+      summary: Delete private file
+      description: >-
+        Remove a recently uploaded private file. Requires JWT with `delete` scope and a `cli_code` claim matching the
+        path, and the file must be younger than the deployment's `DELETE_MAX_AGE`, measured from its first upload.
+        A foreign client code or an elapsed window answers `403`. Deployments without `DELETE_MAX_AGE` do not
+        register this operation and answer `405`.
+      tags:
+        - Files
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      responses:
+        "204":
+          $ref: "#/components/responses/Deleted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/UnauthorizedError"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/DeleteDisabled"
 
   /file-upload:
     post:
@@ -389,6 +449,6 @@ tags:
   - name: System
     description: Health and status endpoints
   - name: Files
-    description: File retrieval endpoints
+    description: File retrieval and deletion endpoints
   - name: Upload
     description: File upload and URL fetch endpoints

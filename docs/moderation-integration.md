@@ -65,6 +65,8 @@ If `MALWARE_SCANNER_URL` and `MEDIA_SCREENER_URL` are both empty, moderation is 
    - If clean: save metadata with `clean` status.
 4. **On scanner error**: queue for retry with exponential backoff (5 retries max).
 
+When a file is removed through the opt-in `DELETE /files/` endpoint (see `DELETE_MAX_AGE` in the README), the metadata record is kept and its `status` set to `deleted`, with `completed_at` updated and any earlier scan results preserved. A file that had no record yet, such as a private upload, gets one. A scan that was still running when the file was deleted does not overwrite that record with `clean`.
+
 ## Scan Order
 
 1. **Malware first** — faster (~20-100ms), security-critical, blocks dangerous content.
@@ -78,7 +80,7 @@ Stored at `SCAN_META_PATH/{relative_path}.json`:
 
 ```json
 {
-  "status": "clean|flagged|malware|error",
+  "status": "clean|flagged|malware|error|deleted",
   "requested_at": "2026-01-18T12:00:00Z",
   "completed_at": "2026-01-18T12:00:01Z",
   "malware": {
