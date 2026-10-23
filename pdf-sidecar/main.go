@@ -21,6 +21,11 @@ import (
 //go:embed placeholder.jpg
 var placeholderJPG []byte
 
+// pdftocairoPath is where Debian's poppler-utils installs pdftocairo in the
+// sidecar image. Absolute rather than looked up on PATH, so what runs is the
+// packaged binary and not whatever a changed PATH would resolve first.
+const pdftocairoPath = "/usr/bin/pdftocairo"
+
 // Config holds the service configuration from environment variables.
 type Config struct {
 	Port           string
@@ -319,7 +324,7 @@ func convertPDFToJPEG(pdfData []byte, params *ResizeParams) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "pdftocairo", args...)
+	cmd := exec.CommandContext(ctx, pdftocairoPath, args...)
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("pdftocairo conversion failed: %w", err)
 	}

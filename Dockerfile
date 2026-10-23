@@ -1,4 +1,4 @@
-# Stage 1: Build & Development (This is what VS Code uses)
+# Stage 1: Build
 FROM docker.io/library/golang:1.27.3-trixie@sha256:fbb7ae40b62ff8afe31662df570d39b4f5052ac32b90dae8e60d7657a20a74f4 AS builder
 WORKDIR /app
 
@@ -6,9 +6,6 @@ WORKDIR /app
 RUN apt update && apt install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-
-# Install Air for live-reloading
-RUN go install github.com/air-verse/air@latest
 
 COPY app/go.mod app/go.sum ./
 RUN go mod download all
@@ -34,6 +31,13 @@ COPY app/ .
 # version only rebuilds the binary, not the module and license layers.
 ARG APP_VERSION=dev
 RUN CGO_ENABLED=0 go build -ldflags "-X main.version=${APP_VERSION}" -o file-api .
+
+# Development: the builder plus Air for live reloading, which .devcontainer
+# targets. Release and CI builds target the final stage and never build this
+# one, so they download nothing for it. Air is pinned by version; go install
+# verifies the module against the Go checksum database.
+FROM builder AS dev
+RUN go install github.com/air-verse/air@v1.67.4
 
 # Stage 2: Production (This is what Podman uses)
 FROM docker.io/library/debian:13.7-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
