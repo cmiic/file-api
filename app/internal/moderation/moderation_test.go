@@ -1,6 +1,10 @@
 package moderation
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 // TestServiceWithoutScannerIsSafe covers a Service built without a scanner -
 // the metadata-only shape the handler tests construct, and what main.go would
@@ -19,4 +23,218 @@ func TestServiceWithoutScannerIsSafe(t *testing.T) {
 
 	// Must be a no-op rather than a panic.
 	s.ProcessUpload("2026/9/photo.jpg", "", "da39a3ee", true)
+}
+
+// TestMarkDeletedKeepsScanResults checks that marking a file deleted changes
+// status and completion time but preserves what the scanners had found.
+func TestMarkDeletedKeepsScanResults(t *testing.T) {
+	base := t.TempDir()
+	svc := NewService(nil, nil, filepath.Join(base, "meta"), filepath.Join(base, "queue"), nil, nil)
+
+	before := &Metadata{
+		Status:     StatusFlagged,
+		NSFWResult: &NSFWInfo{Unsafe: true, Confidence: 0.9},
+	}
+	if err := svc.saveMetadata("2026/1/x.jpg", before); err != nil {
+		t.Fatalf("saveMetadata: %v", err)
+	}
+
+	if err := svc.MarkDeleted("2026/1/x.jpg"); err != nil {
+		t.Fatalf("MarkDeleted: %v", err)
+	}
+	after, err := svc.GetMetadata("2026/1/x.jpg")
+	if err != nil || after == nil {
+		t.Fatalf("GetMetadata: %v, %+v", err, after)
+	}
+	if after.Status != StatusDeleted {
+		t.Errorf("status %q, want %q", after.Status, StatusDeleted)
+	}
+	if after.CompletedAt == nil {
+		t.Error("CompletedAt not set")
+	}
+	if after.NSFWResult == nil || !after.NSFWResult.Unsafe {
+		t.Error("NSFW result lost")
+	}
+}
+
+// TestMarkDeletedWithoutPriorMetadata covers a private upload (never scanned)
+// or an upload made while moderation was off: there is no record yet, and
+// MarkDeleted creates one rather than failing.
+func TestMarkDeletedWithoutPriorMetadata(t *testing.T) {
+	base := t.TempDir()
+	svc := NewService(nil, nil, filepath.Join(base, "meta"), filepath.Join(base, "queue"), nil, nil)
+
+	if err := svc.MarkDeleted("cli/ACME/2026/1/y.pdf"); err != nil {
+		t.Fatalf("MarkDeleted: %v", err)
+	}
+	meta, err := svc.GetMetadata("cli/ACME/2026/1/y.pdf")
+	if err != nil || meta == nil {
+		t.Fatalf("GetMetadata: %v, %+v", err, meta)
+	}
+	if meta.Status != StatusDeleted {
+		t.Errorf("status %q, want %q", meta.Status, StatusDeleted)
+	}
+}
+
+// TestSaveScanResultKeepsDeletedTombstone is the regression test for a scan
+// that finishes after the file was deleted: whatever it concluded (clean, an
+// error from the second scanner failing to open the vanished file, a flag)
+// must not replace the deleted record, and the caller must learn that it did
+// not, so it does not queue a retry for a file that is gone.
+func TestSaveScanResultKeepsDeletedTombstone(t *testing.T) {
+	base := t.TempDir()
+	svc := NewService(nil, nil, filepath.Join(base, "meta"), filepath.Join(base, "queue"), nil, nil)
+	const path = "2026/1/gone.jpg"
+
+	if err := svc.MarkDeleted(path); err != nil {
+		t.Fatalf("MarkDeleted: %v", err)
+	}
+
+	errStr := "nsfw scan: open for nsfw scan: file does not exist"
+	for name, late := range map[string]*Metadata{
+		"clean":   {Status: StatusClean},
+		"error":   {Status: StatusError, Error: &errStr},
+		"flagged": {Status: StatusFlagged, NSFWResult: &NSFWInfo{Unsafe: true}},
+	} {
+		if svc.saveScanResult(path, late) {
+			t.Errorf("%s: late scan result reported as written over a deleted record", name)
+		}
+		meta, err := svc.GetMetadata(path)
+		if err != nil || meta == nil {
+			t.Fatalf("%s: GetMetadata: %v, %+v", name, err, meta)
+		}
+		if meta.Status != StatusDeleted {
+			t.Errorf("%s: tombstone replaced by %q", name, meta.Status)
+		}
+	}
+}
+
+func TestSaveScanResultWritesWhenNotDeleted(t *testing.T) {
+	base := t.TempDir()
+	svc := NewService(nil, nil, filepath.Join(base, "meta"), filepath.Join(base, "queue"), nil, nil)
+	const path = "2026/1/live.jpg"
+
+	if !svc.saveScanResult(path, &Metadata{Status: StatusError}) {
+		t.Fatal("first write refused")
+	}
+	if !svc.saveScanResult(path, &Metadata{Status: StatusClean}) {
+		t.Fatal("overwrite of a non-deleted record refused")
+	}
+	meta, err := svc.GetMetadata(path)
+	if err != nil || meta == nil || meta.Status != StatusClean {
+		t.Fatalf("expected clean, got %+v (%v)", meta, err)
+	}
+}
+
+// TestStoredClearsDeletedTombstoneOnly covers the path being stored again
+// after a delete: identical bytes under the same filename in the same month
+// land on the same relative path, and the tombstone must go. A record with
+// any other status belongs to a file that was present (a dedup hit) and is
+// kept.
+func TestStoredClearsDeletedTombstoneOnly(t *testing.T) {
+	base := t.TempDir()
+	svc := NewService(nil, nil, filepath.Join(base, "meta"), filepath.Join(base, "queue"), nil, nil)
+
+	if err := svc.MarkDeleted("2026/1/again.jpg"); err != nil {
+		t.Fatalf("MarkDeleted: %v", err)
+	}
+	if err := svc.saveMetadata("2026/1/kept.jpg", &Metadata{Status: StatusFlagged}); err != nil {
+		t.Fatalf("saveMetadata: %v", err)
+	}
+
+	svc.Stored("2026/1/again.jpg")
+	svc.Stored("2026/1/kept.jpg")
+	svc.Stored("2026/1/never-seen.jpg") // no record: must be a no-op, not an error
+
+	if meta, err := svc.GetMetadata("2026/1/again.jpg"); err != nil || meta != nil {
+		t.Errorf("tombstone survived re-store: %+v (%v)", meta, err)
+	}
+	if meta, err := svc.GetMetadata("2026/1/kept.jpg"); err != nil || meta == nil || meta.Status != StatusFlagged {
+		t.Errorf("non-deleted record was touched: %+v (%v)", meta, err)
+	}
+}
+
+// TestProcessUploadClearsTombstoneWithoutScanner pins that the clearing
+// happens before the Enabled and isPublic checks: a private re-upload is
+// never scanned, and a deployment without scanners never scans at all, yet
+// both must still shed the tombstone.
+func TestProcessUploadClearsTombstoneWithoutScanner(t *testing.T) {
+	base := t.TempDir()
+	svc := NewService(nil, nil, filepath.Join(base, "meta"), filepath.Join(base, "queue"), nil, nil)
+	const private = "cli/ACME/2026/1/again.pdf"
+
+	if err := svc.MarkDeleted(private); err != nil {
+		t.Fatalf("MarkDeleted: %v", err)
+	}
+	svc.ProcessUpload(private, "ACME", "", false)
+
+	if meta, err := svc.GetMetadata(private); err != nil || meta != nil {
+		t.Errorf("tombstone survived ProcessUpload: %+v (%v)", meta, err)
+	}
+}
+
+// TestMarkDeletedSkipsWhenFileIsPresent is the regression test for a re-upload
+// that completes between the handler's Remove and MarkDeleted: the file is
+// back on its path, so no deleted record may be written for it.
+func TestMarkDeletedSkipsWhenFileIsPresent(t *testing.T) {
+	base := t.TempDir()
+	files := filepath.Join(base, "files")
+	if err := os.MkdirAll(filepath.Join(files, "2026", "1"), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	open := func(rel string) (*os.File, error) { return os.Open(filepath.Join(files, rel)) }
+	svc := NewService(nil, nil, filepath.Join(base, "meta"), filepath.Join(base, "queue"), nil, open)
+
+	const present = "2026/1/back.jpg"
+	if err := os.WriteFile(filepath.Join(files, present), []byte("back"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := svc.MarkDeleted(present); err != nil {
+		t.Fatalf("MarkDeleted: %v", err)
+	}
+	if meta, err := svc.GetMetadata(present); err != nil || meta != nil {
+		t.Errorf("a present file got a deleted record: %+v (%v)", meta, err)
+	}
+
+	const absent = "2026/1/gone.jpg"
+	if err := svc.MarkDeleted(absent); err != nil {
+		t.Fatalf("MarkDeleted: %v", err)
+	}
+	if meta, err := svc.GetMetadata(absent); err != nil || meta == nil || meta.Status != StatusDeleted {
+		t.Errorf("an absent file got no deleted record: %+v (%v)", meta, err)
+	}
+}
+
+// TestStoredKeepsTombstoneWhenFileIsAbsent is the regression test for a
+// DELETE landing between a caller's StoreFile and its Stored call: the file
+// is gone again and the record it would clear is the current truth.
+func TestStoredKeepsTombstoneWhenFileIsAbsent(t *testing.T) {
+	base := t.TempDir()
+	files := filepath.Join(base, "files")
+	if err := os.MkdirAll(filepath.Join(files, "2026", "1"), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	open := func(rel string) (*os.File, error) { return os.Open(filepath.Join(files, rel)) }
+	svc := NewService(nil, nil, filepath.Join(base, "meta"), filepath.Join(base, "queue"), nil, open)
+
+	const absent = "2026/1/gone-again.jpg"
+	if err := svc.MarkDeleted(absent); err != nil {
+		t.Fatalf("MarkDeleted: %v", err)
+	}
+	svc.Stored(absent)
+	if meta, err := svc.GetMetadata(absent); err != nil || meta == nil || meta.Status != StatusDeleted {
+		t.Errorf("tombstone cleared although the file is absent: %+v (%v)", meta, err)
+	}
+
+	const present = "2026/1/really-back.jpg"
+	if err := svc.MarkDeleted(present); err != nil {
+		t.Fatalf("MarkDeleted: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(files, present), []byte("back"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	svc.Stored(present)
+	if meta, err := svc.GetMetadata(present); err != nil || meta != nil {
+		t.Errorf("tombstone kept although the file is present: %+v (%v)", meta, err)
+	}
 }

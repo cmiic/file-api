@@ -64,10 +64,11 @@ func main() {
 
 	// Initialize handlers with size limits
 	uploadHandler := handler.NewUploadHandler(store, moderationSvc, cfg.MaxUploadSize, cfg.JWTSecret)
-	fetchHandler := handler.NewFetchHandler(store, cfg.MaxUploadSize, cfg.JWTSecret)
+	fetchHandler := handler.NewFetchHandler(store, moderationSvc, cfg.MaxUploadSize, cfg.JWTSecret)
 	serveHandler := handler.NewServeHandler(store)
 	healthHandler := handler.NewHealthHandler()
 	metaHandler := handler.NewMetaHandler(moderationSvc)
+	deleteHandler := handler.NewDeleteHandler(store, moderationSvc, cfg.DeleteMaxAge)
 
 	// Create router using Go 1.22+ ServeMux with pattern matching
 	mux := http.NewServeMux()
@@ -106,6 +107,18 @@ func main() {
 	// POST /file-resize/cli/{code}/url/{url} - private fetch
 	mux.Handle("POST /file-resize", jwtAuth.Middleware(true)(fetchHandler))
 	mux.Handle("POST /file-resize/", jwtAuth.Middleware(true)(fetchHandler))
+
+	// Delete endpoint (JWT required with delete scope), opt-in. Not registered
+	// at all when DELETE_MAX_AGE is unset, so the mux answers 405 and the
+	// store keeps its historical write-once contract.
+	// DELETE /files/{path}            - public file
+	// DELETE /files/cli/{code}/{path} - private file, cli_code must match
+	if cfg.DeleteMaxAge > 0 {
+		mux.Handle("DELETE /files/", jwtAuth.Middleware(true)(deleteHandler))
+		log.Printf("Deletion enabled: files younger than %s may be deleted", cfg.DeleteMaxAge)
+	} else {
+		log.Println("Deletion disabled (DELETE_MAX_AGE not set)")
+	}
 
 	// Metadata endpoint (JWT required with scan:read scope)
 	// GET /meta/files/{path...} - get scan metadata for a file

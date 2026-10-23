@@ -26,6 +26,10 @@ const (
 	StatusFlagged Status = "flagged"
 	StatusMalware Status = "malware"
 	StatusError   Status = "error"
+	// StatusDeleted marks a file removed through the DELETE endpoint. Written
+	// so that a consumer polling for a verdict before persisting its own
+	// record sees that the file is gone rather than a stale "clean".
+	StatusDeleted Status = "deleted"
 )
 
 // Metadata contains scan results for a file.
@@ -116,6 +120,12 @@ type Service struct {
 	// Background processing
 	mu         sync.Mutex
 	processing map[string]bool // tracks files currently being processed
+
+	// metaMu serializes every read-then-write of a metadata record: scan
+	// results, the deleted tombstone, and its removal on re-upload. Without
+	// it a scan finishing concurrently with a DELETE could read "no record",
+	// then write "clean" over the tombstone the handler had just written.
+	metaMu sync.Mutex
 }
 
 // NewService creates a new moderation service.
@@ -169,6 +179,12 @@ func (s *Service) Enabled() bool {
 // ProcessUpload triggers async scanning for a newly uploaded file.
 // This is non-blocking and runs in a goroutine.
 func (s *Service) ProcessUpload(relativePath, clientCode, sha1 string, isPublic bool) {
+	// Before anything else, and regardless of whether scanning runs: the
+	// path may have been deleted and is now stored again (identical bytes
+	// under the same filename in the same month land on the same path), and
+	// the tombstone from that deletion must not outlive the file's return.
+	s.Stored(relativePath)
+
 	if !s.Enabled() {
 		return
 	}
@@ -261,7 +277,7 @@ func (s *Service) scan(relativePath, clientCode, sha1 string, isPublic bool) {
 				}
 
 				// Save metadata and notify
-				s.saveMetadata(relativePath, meta)
+				s.saveScanResult(relativePath, meta)
 				s.notifier.MalwareAlert(sha1, scopeOf(isPublic), malwareName)
 				return // Don't continue with NSFW scan
 			}
@@ -289,20 +305,24 @@ func (s *Service) scan(relativePath, clientCode, sha1 string, isPublic bool) {
 				// Don't delete, just flag
 				log.Printf("NSFW content flagged: %q (confidence: %.2f)", relativePath, result.Confidence)
 
-				s.saveMetadata(relativePath, meta)
+				s.saveScanResult(relativePath, meta)
 				s.notifier.NSFWAlert(sha1, scopeOf(isPublic), result.Confidence, result.DetectedClasses)
 				return
 			}
 		}
 	}
 
-	// Handle errors - queue for retry
+	// Handle errors - queue for retry. A failure caused by the file having
+	// been deleted mid-scan (the second scanner cannot open it) is not
+	// retried: the record is already the tombstone, and there is nothing
+	// left to scan.
 	if scanErr != nil {
 		errStr := scanErr.Error()
 		meta.Status = StatusError
 		meta.Error = &errStr
-		s.saveMetadata(relativePath, meta)
-		s.queueForRetry(relativePath, clientCode, sha1, isPublic, errStr)
+		if s.saveScanResult(relativePath, meta) {
+			s.queueForRetry(relativePath, clientCode, sha1, isPublic, errStr)
+		}
 		return
 	}
 
@@ -310,8 +330,116 @@ func (s *Service) scan(relativePath, clientCode, sha1 string, isPublic bool) {
 	meta.Status = StatusClean
 	now := time.Now()
 	meta.CompletedAt = &now
-	s.saveMetadata(relativePath, meta)
-	log.Printf("Scan complete (clean): %q", relativePath)
+	if s.saveScanResult(relativePath, meta) {
+		log.Printf("Scan complete (clean): %q", relativePath)
+	}
+}
+
+// saveScanResult writes a scan outcome unless the file was deleted while the
+// scan ran. The scanners hold the file open, so a scan can finish, flag, or
+// fail on bytes that are no longer stored; whatever it concluded must not
+// replace the deleted record MarkDeleted left, or a consumer polling for a
+// verdict would be told "clean" (or "error", and see a retry queued) about a
+// file that is gone. Returns whether the write happened.
+func (s *Service) saveScanResult(relativePath string, meta *Metadata) bool {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+
+	existing, err := s.GetMetadata(relativePath)
+	if err != nil {
+		log.Printf("Could not read existing metadata for %q, writing scan result anyway: %v", relativePath, err)
+	} else if existing != nil && existing.Status == StatusDeleted {
+		log.Printf("Scan finished after deletion, keeping deleted record: %q", relativePath)
+		return false
+	}
+	if err := s.saveMetadata(relativePath, meta); err != nil {
+		log.Printf("Failed to save metadata for %q: %v", relativePath, err)
+	}
+	return true
+}
+
+// MarkDeleted records that the file was removed through the DELETE endpoint.
+// Existing scan results are kept alongside the new status so the record still
+// says what was known about the file; only status and completion time change.
+// A file that never had metadata (moderation off at upload time, or a private
+// upload, which is not scanned) gets a fresh record so the metadata endpoint
+// answers consistently.
+//
+// The record is only written while the file is confirmed absent. Identical
+// bytes under the same filename land on the same path, so an upload that
+// completes between the handler's Remove and this call has already put a
+// file back; its Stored call, queued behind the same lock, would find no
+// record yet and the one written here would then describe a present file
+// forever (private uploads are never scanned, and scans refuse to overwrite
+// a deleted record). The check and the write happen under one lock, and
+// Stored takes that lock after the file is in place, so either order of the
+// two ends without a stale record.
+func (s *Service) MarkDeleted(relativePath string) error {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+
+	if present, known := s.filePresent(relativePath); known && present {
+		log.Printf("File was stored again before its deleted record was written, leaving no record: %q", relativePath)
+		return nil
+	}
+
+	meta, err := s.GetMetadata(relativePath)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	if meta == nil {
+		meta = &Metadata{RequestedAt: now}
+	}
+	meta.Status = StatusDeleted
+	meta.CompletedAt = &now
+	return s.saveMetadata(relativePath, meta)
+}
+
+// filePresent reports whether a file is present at relativePath. known is
+// false when the Service has no opener (a metadata-only Service, as the
+// handler tests build) or the open failed for a reason other than absence;
+// callers then proceed as they would without the check rather than guess.
+func (s *Service) filePresent(relativePath string) (present, known bool) {
+	if s.openFile == nil {
+		return false, false
+	}
+	f, err := s.openFile(relativePath)
+	if err != nil {
+		return false, os.IsNotExist(err)
+	}
+	f.Close()
+	return true, true
+}
+
+// Stored is called whenever a file has been written at relativePath. If a
+// deleted tombstone sits there from an earlier incarnation of the same path,
+// it is removed: the record described a file that no longer existed, and
+// now one does. Any other record is left alone; a deduplicated re-upload
+// found the file present, so its verdict still stands.
+//
+// The mirror of MarkDeleted's check: a DELETE that lands between the
+// caller's StoreFile and this call has removed the file again and written
+// the record this would clear, so the record is only removed while the file
+// is confirmed present. Both checks run under metaMu, so the two paths see
+// each other's writes in order.
+func (s *Service) Stored(relativePath string) {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+
+	existing, err := s.GetMetadata(relativePath)
+	if err != nil || existing == nil || existing.Status != StatusDeleted {
+		return
+	}
+	if present, known := s.filePresent(relativePath); known && !present {
+		log.Printf("File was deleted again before its re-store was recorded, keeping deleted record: %q", relativePath)
+		return
+	}
+	if err := os.Remove(s.metadataPath(relativePath)); err != nil && !os.IsNotExist(err) {
+		log.Printf("Could not clear deleted record for re-stored %q: %v", relativePath, err)
+		return
+	}
+	log.Printf("Cleared deleted record for re-stored file: %q", relativePath)
 }
 
 // scanMalware and scanNSFW open the stored file through the storage root and

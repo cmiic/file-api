@@ -16,7 +16,7 @@ func TestFetchClientIgnoresEnvironmentProxy(t *testing.T) {
 	t.Setenv("HTTP_PROXY", "http://proxy.invalid:3128")
 	t.Setenv("HTTPS_PROXY", "http://proxy.invalid:3128")
 
-	h := NewFetchHandler(nil, 1<<20, "test-secret")
+	h := NewFetchHandler(nil, nil, 1<<20, "test-secret")
 
 	transport, ok := h.httpClient.Transport.(*http.Transport)
 	if !ok {
