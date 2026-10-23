@@ -232,8 +232,10 @@ func extractFilenameFromResponse(resp *http.Response, rawURL string) string {
 
 // filenameFromDisposition returns the filename parameter of a
 // Content-Disposition header, or "". mime.ParseMediaType handles quoting,
-// further parameters after the filename, and the RFC 2231 form
-// filename*=UTF-8”..., which it decodes into "filename".
+// further parameters after the filename, and the RFC 2231 encoded form, which
+// it decodes into "filename":
+//
+//	attachment; filename*=UTF-8''r%C3%A9sum%C3%A9.pdf
 func filenameFromDisposition(header string) string {
 	if header == "" {
 		return ""
