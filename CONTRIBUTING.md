@@ -35,7 +35,7 @@ Copilot reviews every pull request automatically. Address or reply to what it ra
 
 ## Commit messages
 
-Use a short imperative subject with a conventional prefix, matching the existing history:
+Pull requests are squash-merged: `main` gets one commit per pull request, with the pull request title as its subject and the description as its body. Give the title a short imperative subject with a conventional prefix, matching the existing history:
 
 ```text
 feat: bound media processing resources
@@ -44,7 +44,7 @@ docs: record third-party signature terms
 chore(deps): bump ruff from 0.16.3 to 0.16.4
 ```
 
-Explain *why* in the body when the reason is not obvious from the diff.
+Explain *why* in the description when the reason is not obvious from the diff. Commits on the branch can be as fine-grained as the review needs; they stay on the pull request and do not reach `main`.
 
 ## Licensing of contributions
 
