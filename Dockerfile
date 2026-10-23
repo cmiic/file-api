@@ -1,5 +1,5 @@
 # Stage 1: Build & Development (This is what VS Code uses)
-FROM docker.io/library/golang:1.27.2-trixie@sha256:47667934874913a449b96faa7ef4777fa285d9ec29126ee80ed61c45b7cccf0e AS builder
+FROM docker.io/library/golang:1.27.3-trixie@sha256:fbb7ae40b62ff8afe31662df570d39b4f5052ac32b90dae8e60d7657a20a74f4 AS builder
 WORKDIR /app
 
 # Install dependencies needed for development AND execution
@@ -32,7 +32,7 @@ COPY app/ .
 RUN CGO_ENABLED=0 go build -o file-api .
 
 # Stage 2: Production (This is what Podman uses)
-FROM docker.io/library/debian:13.7-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+FROM docker.io/library/debian:13.7-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
 WORKDIR /app
 
 LABEL org.opencontainers.image.source="https://github.com/cmiic/file-api" \
