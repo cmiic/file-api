@@ -63,7 +63,11 @@ func (h *DeleteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/files/")
 	path = strings.TrimPrefix(path, "/files")
 	sanitizedPath, err := storage.SanitizeRequestPath(path)
-	if err != nil {
+	// The sanitizer lets a leading slash through (an encoded "%2fetc/passwd"
+	// arrives decoded as "/etc/passwd"). The storage root would refuse it,
+	// but with a containment error rather than not-exist, which the branches
+	// below would report as a 500. Absolute is simply not a valid request.
+	if err != nil || strings.HasPrefix(sanitizedPath, "/") {
 		http.Error(w, "Invalid path", http.StatusBadRequest)
 		return
 	}

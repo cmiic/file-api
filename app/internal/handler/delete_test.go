@@ -243,6 +243,10 @@ func TestDeleteRejectsEncodedTraversal(t *testing.T) {
 		"/files/%2e%2e%2fvictim.txt",
 		"/files/%2e%2e/victim.txt",
 		"/files/..%2fvictim.txt",
+		// Encoded absolute paths sanitize to a leading "/" and must be a 400
+		// here, not the 500 the storage root's containment error would give.
+		"/files/%2fetc%2fpasswd",
+		"/files/%2Fetc/passwd",
 	}
 	for _, target := range targets {
 		rec := f.do(target, deleteClaims("", "delete"))

@@ -94,17 +94,17 @@ func Load() *Config {
 	}
 }
 
-// parseDeleteMaxAge interprets the DELETE_MAX_AGE variable. Empty means
-// deletion is disabled, which is the default and the historical behavior.
-// Anything else must be a positive Go duration such as "30m" or "24h"; a
-// value that does not parse, or is zero or negative, is an error so that
-// Load can refuse to start.
+// parseDeleteMaxAge interprets the DELETE_MAX_AGE variable. Unset or empty
+// means deletion is disabled, which is the default and the historical
+// behavior. Anything else, including a value that is only whitespace, must
+// be a positive Go duration such as "30m" or "24h"; a value that does not
+// parse, or is zero or negative, is an error so that Load can refuse to
+// start. Surrounding whitespace around a real value is tolerated.
 func parseDeleteMaxAge(raw string) (time.Duration, error) {
-	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return 0, nil
 	}
-	d, err := time.ParseDuration(raw)
+	d, err := time.ParseDuration(strings.TrimSpace(raw))
 	if err != nil {
 		return 0, fmt.Errorf("DELETE_MAX_AGE %q is not a duration (use e.g. 30m or 24h): %w", raw, err)
 	}

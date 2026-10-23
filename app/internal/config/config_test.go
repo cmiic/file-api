@@ -12,7 +12,7 @@ func TestParseDeleteMaxAge(t *testing.T) {
 		wantErr bool
 	}{
 		{raw: "", want: 0},
-		{raw: "   ", want: 0},
+		{raw: "   ", wantErr: true}, // set but blank is a typo, not "disabled"
 		{raw: "30m", want: 30 * time.Minute},
 		{raw: "24h", want: 24 * time.Hour},
 		{raw: " 1h30m ", want: 90 * time.Minute},

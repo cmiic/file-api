@@ -177,8 +177,6 @@ services:
     environment:
       MODEL_PATH: /models/640m.onnx
       MAX_UPLOAD_SIZE: ${MAX_UPLOAD_SIZE:-209715200}
-      # Deletion is off unless DELETE_MAX_AGE is a positive Go duration, e.g. 24h.
-      DELETE_MAX_AGE: ${DELETE_MAX_AGE:-}
       MAX_PDF_PAGES: "100"
       MAX_PDF_RENDERED_PIXELS: "100000000"
       MAX_VIDEO_DURATION_SECONDS: "600"
