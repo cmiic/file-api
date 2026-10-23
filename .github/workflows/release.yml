@@ -48,7 +48,7 @@ jobs:
           TAG: ${{ steps.release_tag.outputs.tag }}
         run: |
           set -euo pipefail
-          docker build -t "${API_IMAGE_NAME}:${TAG}" .
+          docker build --build-arg APP_VERSION="${TAG#v}" -t "${API_IMAGE_NAME}:${TAG}" .
           docker push "${API_IMAGE_NAME}:${TAG}"
 
       - name: Build and push PDF sidecar image
@@ -56,7 +56,7 @@ jobs:
           TAG: ${{ steps.release_tag.outputs.tag }}
         run: |
           set -euo pipefail
-          docker build -t "${PDF_IMAGE_NAME}:${TAG}" ./pdf-sidecar
+          docker build --build-arg APP_VERSION="${TAG#v}" -t "${PDF_IMAGE_NAME}:${TAG}" ./pdf-sidecar
           docker push "${PDF_IMAGE_NAME}:${TAG}"
 
       - name: Resolve PDF sidecar GPL source

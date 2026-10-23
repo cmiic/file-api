@@ -138,8 +138,13 @@ func parseRequest(path string) (*ResizeParams, string, error) {
 	}, filePath, nil
 }
 
+// version is stamped at link time from the release tag, as in file-api:
+// go build -ldflags "-X main.version=1.1.0". Anything else reports "dev".
+var version = "dev"
+
 func main() {
 	cfg := loadConfig()
+	log.Printf("Starting pdf-sidecar %s on :%s", version, cfg.Port)
 
 	initResizePattern(cfg.PathPrefix)
 

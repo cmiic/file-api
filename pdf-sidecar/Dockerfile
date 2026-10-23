@@ -22,14 +22,20 @@ RUN mkdir -p /third-party-licenses/go /third-party-licenses/modules \
 COPY . .
 
 # Static build for production
-RUN CGO_ENABLED=0 go build -o pdf-sidecar .
+# Set by the release workflow from the git tag (without its leading "v"); local
+# and CI builds keep "dev". Declared just before the build step so a new
+# version only rebuilds the binary, not the module and license layers.
+ARG APP_VERSION=dev
+RUN CGO_ENABLED=0 go build -ldflags "-X main.version=${APP_VERSION}" -o pdf-sidecar .
 
 # Stage 2: Production
 FROM docker.io/library/debian:13.7-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
 WORKDIR /app
 
+ARG APP_VERSION=dev
 LABEL org.opencontainers.image.source="https://github.com/cmiic/file-api" \
-    org.opencontainers.image.title="File API PDF Sidecar"
+    org.opencontainers.image.title="File API PDF Sidecar" \
+    org.opencontainers.image.version="${APP_VERSION}"
 
 # Create non-root user
 RUN groupadd -r pdfsidecar && useradd -r -g pdfsidecar pdfsidecar
