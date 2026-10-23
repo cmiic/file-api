@@ -35,6 +35,23 @@ updates:
           - patch
         patterns:
           - "*"
+  - package-ecosystem: gomod
+    directory: /tools
+    schedule:
+      interval: daily
+      time: "21:25"
+      timezone: UTC
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - go
+    groups:
+      go-all:
+        update-types:
+          - minor
+          - patch
+        patterns:
+          - "*"
   - package-ecosystem: docker
     directory: /
     schedule:

@@ -2,7 +2,7 @@
     "name": "Go File API (Live Reloading)",
     "build": {
         "dockerfile": "../Dockerfile",
-        "target": "builder"
+        "target": "dev"
     },
     "customizations": {
         "vscode": {

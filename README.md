@@ -89,7 +89,7 @@ docker compose -f compose.dev.yaml down -v   # destructive
 ```
 
 To iterate on the Go service alone, [.devcontainer](.devcontainer) builds the
-`builder` stage and runs `air` for live reloading.
+`dev` stage and runs `air` for live reloading.
 
 ### Tests
 

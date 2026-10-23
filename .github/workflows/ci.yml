@@ -30,17 +30,14 @@ jobs:
         working-directory: pdf-sidecar
         run: go vet ./...
 
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 24
-        env:
-          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
-      - name: Install markdownlint
-        run: npm install -g markdownlint-cli2
-
+      # markdownlint-cli2 through its author's action, pinned by commit: CI runs
+      # no npm install, so no unlocked dependency tree and no lifecycle scripts,
+      # and Dependabot keeps the pin current. The action's globs default to the
+      # repository root only, so they repeat the config's; its ignores still apply.
       - name: Run markdownlint
-        run: markdownlint-cli2
+        uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff # v24.2.0
+        with:
+          globs: '**/*.md'
 
   build:
     name: Build
