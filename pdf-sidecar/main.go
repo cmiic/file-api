@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	_ "embed"
+	_ "embed" // enables the //go:embed directive for placeholderJPG
 	"fmt"
 	"io"
 	"log"
@@ -20,6 +20,12 @@ import (
 
 //go:embed placeholder.jpg
 var placeholderJPG []byte
+
+// headerPDFError names why a request got the placeholder instead of a
+// rendering: parse-failed, fetch-failed or convert-failed. Only these fixed
+// codes are sent; the underlying error goes to the log, because it can carry
+// file-api's internal URL and this header reaches public clients.
+const headerPDFError = "X-PDF-Error"
 
 // pdftocairoPath is where Debian's poppler-utils installs pdftocairo in the
 // sidecar image. Absolute rather than looked up on PATH, so what runs is the
@@ -201,8 +207,7 @@ func handlePDFResize(w http.ResponseWriter, r *http.Request, cfg Config) {
 	// Parse the URL to extract resize params and file path
 	params, filePath, err := parseRequest(r.URL.Path)
 	if err != nil {
-		w.Header().Set("X-PDF-Error", "parse-failed")
-		servePlaceholder(w)
+		servePlaceholder(w, "parse-failed")
 		return
 	}
 
@@ -220,16 +225,16 @@ func handlePDFResize(w http.ResponseWriter, r *http.Request, cfg Config) {
 	// Fetch PDF from file-api
 	pdfData, err := fetchPDF(cfg, filePath, r)
 	if err != nil {
-		w.Header().Set("X-PDF-Error", "fetch-failed: "+err.Error())
-		servePlaceholder(w)
+		log.Printf("fetch %q failed: %v", filePath, err)
+		servePlaceholder(w, "fetch-failed")
 		return
 	}
 
 	// Convert PDF to JPEG
 	jpegData, err := convertPDFToJPEG(pdfData, params)
 	if err != nil {
-		w.Header().Set("X-PDF-Error", "convert-failed: "+err.Error())
-		servePlaceholder(w)
+		log.Printf("convert %q failed: %v", filePath, err)
+		servePlaceholder(w, "convert-failed")
 		return
 	}
 
@@ -334,7 +339,17 @@ func convertPDFToJPEG(pdfData []byte, params *ResizeParams) ([]byte, error) {
 	return os.ReadFile(outputPath)
 }
 
-func servePlaceholder(w http.ResponseWriter) {
+// servePlaceholder answers a request that could not be rendered with the
+// placeholder image and the reason code in X-PDF-Error.
+//
+// The placeholder must never be cached. nginx caches public thumbnails for a
+// year, and status 200 alone would let one transient failure (file-api
+// restarting, a timeout under load) pin the placeholder to that URL for as
+// long. nginx honours an upstream Cache-Control when deciding what to cache,
+// even where it hides the header from clients.
+func servePlaceholder(w http.ResponseWriter, reason string) {
+	w.Header().Set(headerPDFError, reason)
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "image/jpeg")
 	w.Header().Set("Content-Length", strconv.Itoa(len(placeholderJPG)))
 	w.WriteHeader(http.StatusOK)
