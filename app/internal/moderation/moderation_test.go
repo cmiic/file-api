@@ -1,6 +1,7 @@
 package moderation
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -169,5 +170,37 @@ func TestProcessUploadClearsTombstoneWithoutScanner(t *testing.T) {
 
 	if meta, err := svc.GetMetadata(private); err != nil || meta != nil {
 		t.Errorf("tombstone survived ProcessUpload: %+v (%v)", meta, err)
+	}
+}
+
+// TestMarkDeletedSkipsWhenFileIsPresent is the regression test for a re-upload
+// that completes between the handler's Remove and MarkDeleted: the file is
+// back on its path, so no deleted record may be written for it.
+func TestMarkDeletedSkipsWhenFileIsPresent(t *testing.T) {
+	base := t.TempDir()
+	files := filepath.Join(base, "files")
+	if err := os.MkdirAll(filepath.Join(files, "2026", "1"), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	open := func(rel string) (*os.File, error) { return os.Open(filepath.Join(files, rel)) }
+	svc := NewService(nil, nil, filepath.Join(base, "meta"), filepath.Join(base, "queue"), nil, open)
+
+	const present = "2026/1/back.jpg"
+	if err := os.WriteFile(filepath.Join(files, present), []byte("back"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := svc.MarkDeleted(present); err != nil {
+		t.Fatalf("MarkDeleted: %v", err)
+	}
+	if meta, err := svc.GetMetadata(present); err != nil || meta != nil {
+		t.Errorf("a present file got a deleted record: %+v (%v)", meta, err)
+	}
+
+	const absent = "2026/1/gone.jpg"
+	if err := svc.MarkDeleted(absent); err != nil {
+		t.Fatalf("MarkDeleted: %v", err)
+	}
+	if meta, err := svc.GetMetadata(absent); err != nil || meta == nil || meta.Status != StatusDeleted {
+		t.Errorf("an absent file got no deleted record: %+v (%v)", meta, err)
 	}
 }

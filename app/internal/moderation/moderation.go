@@ -364,9 +364,24 @@ func (s *Service) saveScanResult(relativePath string, meta *Metadata) bool {
 // A file that never had metadata (moderation off at upload time, or a private
 // upload, which is not scanned) gets a fresh record so the metadata endpoint
 // answers consistently.
+//
+// The record is only written while the file is confirmed absent. Identical
+// bytes under the same filename land on the same path, so an upload that
+// completes between the handler's Remove and this call has already put a
+// file back; its Stored call, queued behind the same lock, would find no
+// record yet and the one written here would then describe a present file
+// forever (private uploads are never scanned, and scans refuse to overwrite
+// a deleted record). The check and the write happen under one lock, and
+// Stored takes that lock after the file is in place, so either order of the
+// two ends without a stale record.
 func (s *Service) MarkDeleted(relativePath string) error {
 	s.metaMu.Lock()
 	defer s.metaMu.Unlock()
+
+	if s.fileReturned(relativePath) {
+		log.Printf("File was stored again before its deleted record was written, leaving no record: %q", relativePath)
+		return nil
+	}
 
 	meta, err := s.GetMetadata(relativePath)
 	if err != nil {
@@ -379,6 +394,21 @@ func (s *Service) MarkDeleted(relativePath string) error {
 	meta.Status = StatusDeleted
 	meta.CompletedAt = &now
 	return s.saveMetadata(relativePath, meta)
+}
+
+// fileReturned reports whether a file is present at relativePath. Without an
+// opener there is nothing to check and the answer is no, so a Service built
+// for metadata only still writes the record.
+func (s *Service) fileReturned(relativePath string) bool {
+	if s.openFile == nil {
+		return false
+	}
+	f, err := s.openFile(relativePath)
+	if err != nil {
+		return false
+	}
+	f.Close()
+	return true
 }
 
 // Stored is called whenever a file has been written at relativePath. If a

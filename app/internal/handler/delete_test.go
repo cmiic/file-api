@@ -21,13 +21,18 @@ import (
 type deleteFixture struct {
 	mux      http.Handler
 	store    *storage.Storage
+	mod      *moderation.Service // nil unless the fixture was built moderated
 	base     string
 	metaPath string
 	// window is the configured DELETE_MAX_AGE for this fixture.
 	window time.Duration
 }
 
-func newDeleteFixture(t *testing.T, mod *moderation.Service, window time.Duration) *deleteFixture {
+// newDeleteFixture builds the fixture. With moderated set, a metadata-only
+// moderation service is created over the same storage root (so its presence
+// check sees the files the handler deletes) and exposed as f.mod; otherwise
+// the handler gets the nil service main.go passes when no scanner is set.
+func newDeleteFixture(t *testing.T, moderated bool, window time.Duration) *deleteFixture {
 	t.Helper()
 	base := t.TempDir()
 	filesDir := filepath.Join(base, "files")
@@ -37,6 +42,12 @@ func newDeleteFixture(t *testing.T, mod *moderation.Service, window time.Duratio
 	}
 	t.Cleanup(func() { store.Close() })
 
+	var mod *moderation.Service
+	metaPath := filepath.Join(base, "meta")
+	if moderated {
+		mod = moderation.NewService(nil, nil, metaPath, filepath.Join(base, "queue"), store.DeleteFile, store.Open)
+	}
+
 	mux := http.NewServeMux()
 	mux.Handle("DELETE /files/", NewDeleteHandler(store, mod, window))
 	// The serve routes exist in main.go too; registering GET here makes the
@@ -44,7 +55,7 @@ func newDeleteFixture(t *testing.T, mod *moderation.Service, window time.Duratio
 	// path some other method handles.
 	mux.Handle("GET /files/", NewServeHandler(store))
 
-	return &deleteFixture{mux: mux, store: store, base: filesDir, window: window}
+	return &deleteFixture{mux: mux, store: store, mod: mod, base: filesDir, metaPath: metaPath, window: window}
 }
 
 // put stores content under the uploader filename and returns the relative
@@ -93,7 +104,7 @@ func (f *deleteFixture) do(target string, claims *middleware.Claims) *httptest.R
 }
 
 func TestDeleteRemovesFreshPublicFile(t *testing.T) {
-	f := newDeleteFixture(t, nil, time.Hour)
+	f := newDeleteFixture(t, false, time.Hour)
 	rel := f.put(t, "oops", "wrong.txt", "")
 
 	rec := f.do("/files/"+rel, deleteClaims("", "upload", "delete"))
@@ -107,7 +118,7 @@ func TestDeleteRemovesFreshPublicFile(t *testing.T) {
 }
 
 func TestDeleteRequiresDeleteScope(t *testing.T) {
-	f := newDeleteFixture(t, nil, time.Hour)
+	f := newDeleteFixture(t, false, time.Hour)
 	rel := f.put(t, "keep", "keep.txt", "")
 
 	cases := map[string]*middleware.Claims{
@@ -128,7 +139,7 @@ func TestDeleteRequiresDeleteScope(t *testing.T) {
 }
 
 func TestDeleteRefusesFileOlderThanWindow(t *testing.T) {
-	f := newDeleteFixture(t, nil, time.Hour)
+	f := newDeleteFixture(t, false, time.Hour)
 	rel := f.put(t, "archived", "old.txt", "")
 	f.age(t, rel, 2*time.Hour)
 
@@ -149,7 +160,7 @@ func TestDeleteWindowIsMeasuredFromFirstUpload(t *testing.T) {
 	// A deduplicated re-upload must not refresh the clock: the second
 	// uploader is handed the first uploader's path, and it is the first
 	// upload's age that bounds what can be removed.
-	f := newDeleteFixture(t, nil, time.Hour)
+	f := newDeleteFixture(t, false, time.Hour)
 	rel := f.put(t, "shared bytes", "shared.txt", "")
 	f.age(t, rel, 2*time.Hour)
 	again := f.put(t, "shared bytes", "shared.txt", "")
@@ -168,7 +179,7 @@ func TestDeleteWindowIsMeasuredFromFirstUpload(t *testing.T) {
 }
 
 func TestDeletePrivateFileChecksClientCode(t *testing.T) {
-	f := newDeleteFixture(t, nil, time.Hour)
+	f := newDeleteFixture(t, false, time.Hour)
 	rel := f.put(t, "private", "doc.pdf", "ACME")
 	if !strings.HasPrefix(rel, "cli/ACME/") {
 		t.Fatalf("unexpected private path %q", rel)
@@ -196,7 +207,7 @@ func TestDeletePrivateFileChecksClientCode(t *testing.T) {
 }
 
 func TestDeleteUnknownPathIs404(t *testing.T) {
-	f := newDeleteFixture(t, nil, time.Hour)
+	f := newDeleteFixture(t, false, time.Hour)
 
 	rec := f.do("/files/2026/1/nothing-here.txt", deleteClaims("", "delete"))
 
@@ -206,7 +217,7 @@ func TestDeleteUnknownPathIs404(t *testing.T) {
 }
 
 func TestDeleteDirectoryIs404(t *testing.T) {
-	f := newDeleteFixture(t, nil, time.Hour)
+	f := newDeleteFixture(t, false, time.Hour)
 	rel := f.put(t, "x", "x.txt", "")
 	dir := filepath.Dir(rel)
 
@@ -221,7 +232,7 @@ func TestDeleteDirectoryIs404(t *testing.T) {
 }
 
 func TestDeleteRejectsEncodedTraversal(t *testing.T) {
-	f := newDeleteFixture(t, nil, time.Hour)
+	f := newDeleteFixture(t, false, time.Hour)
 	// A file one level above the storage root that a traversal would reach.
 	victim := filepath.Join(filepath.Dir(f.base), "victim.txt")
 	if err := os.WriteFile(victim, []byte("outside"), 0644); err != nil {
@@ -245,14 +256,12 @@ func TestDeleteRejectsEncodedTraversal(t *testing.T) {
 }
 
 func TestDeleteMarksMetadataDeleted(t *testing.T) {
-	base := t.TempDir()
-	metaPath := filepath.Join(base, "meta")
-	mod := moderation.NewService(nil, nil, metaPath, filepath.Join(base, "queue"), nil, nil)
-	f := newDeleteFixture(t, mod, time.Hour)
+	f := newDeleteFixture(t, true, time.Hour)
+	mod := f.mod
 	rel := f.put(t, "scanned", "scanned.jpg", "")
 
 	// Simulate a completed scan the way the moderation service writes it.
-	metaFile := filepath.Join(metaPath, rel+".json")
+	metaFile := filepath.Join(f.metaPath, rel+".json")
 	if err := os.MkdirAll(filepath.Dir(metaFile), 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -285,8 +294,7 @@ func TestDeleteMarksMetadataDeleted(t *testing.T) {
 
 func TestDeleteWithoutModerationToleratesNilService(t *testing.T) {
 	// main.go passes a nil *moderation.Service when no scanner is configured.
-	var mod *moderation.Service
-	f := newDeleteFixture(t, mod, time.Hour)
+	f := newDeleteFixture(t, false, time.Hour)
 	rel := f.put(t, "unscanned", "u.txt", "")
 
 	rec := f.do("/files/"+rel, deleteClaims("", "delete"))
@@ -331,9 +339,8 @@ func TestReuploadAfterDeleteClearsTombstone(t *testing.T) {
 	// End to end through the upload handler's moderation hook: delete, then
 	// store identical bytes under the same filename. The path is identical,
 	// so the deleted record must not describe the file that now exists.
-	base := t.TempDir()
-	mod := moderation.NewService(nil, nil, filepath.Join(base, "meta"), filepath.Join(base, "queue"), nil, nil)
-	f := newDeleteFixture(t, mod, time.Hour)
+	f := newDeleteFixture(t, true, time.Hour)
+	mod := f.mod
 	rel := f.put(t, "comeback", "again.txt", "")
 
 	if rec := f.do("/files/"+rel, deleteClaims("", "delete")); rec.Code != http.StatusNoContent {
