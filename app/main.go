@@ -14,6 +14,14 @@ import (
 	"file-api/internal/storage"
 )
 
+// version is stamped at link time from the release tag:
+//
+//	go build -ldflags "-X main.version=1.1.0"
+//
+// The release workflow passes the tag into the image build as APP_VERSION and
+// the Dockerfile hands it to the linker. Anything else reports "dev".
+var version = "dev"
+
 func main() {
 	// Load configuration
 	cfg := config.Load()
@@ -129,7 +137,7 @@ func main() {
 
 	// Start server
 	addr := ":" + cfg.Port
-	log.Printf("Starting file API server on %s", addr)
+	log.Printf("Starting file API server %s on %s", version, addr)
 	log.Printf("Base path: %s", cfg.BasePath)
 	log.Printf("Max upload size: %d bytes", cfg.MaxUploadSize)
 
