@@ -135,6 +135,11 @@ func TestViewBoxDims(t *testing.T) {
 		{"0 0 0.4 0.4", 0, 0}, // rounds to nothing
 		{"0 0 120", 0, 0},     // too few numbers
 		{"0 0 wide tall", 0, 0},
+		{"0 0 NaN NaN", 0, 0}, // ParseFloat accepts these; NaN fails every comparison
+		{"0 0 Inf 10", 0, 0},
+		{"0 0 120 -Inf", 0, 0},
+		{"0 0 1e300 10", 0, 0},              // would overflow int
+		{"0 0 1073741824 1", 1073741824, 1}, // the largest size accepted
 		{"", 0, 0},
 	}
 	for _, tc := range cases {
@@ -157,5 +162,22 @@ func TestProbeDims_SVG_CommaViewBox(t *testing.T) {
 	w, h, err := ProbeDims(strings.NewReader(svg))
 	if err != nil || w != 64 || h != 48 {
 		t.Errorf("got %dx%d (%v), want 64x48", w, h, err)
+	}
+}
+
+func TestParseSvgLenRejectsUnusableSizes(t *testing.T) {
+	cases := map[string]int{
+		"640":                     640,
+		"640px":                   640,
+		"12.9":                    12,
+		"0.5":                     0,
+		"-10":                     0,
+		"":                        0,
+		"99999999999999999999999": 0, // would overflow int
+	}
+	for in, want := range cases {
+		if got := parseSvgLen(in); got != want {
+			t.Errorf("parseSvgLen(%q) = %d, want %d", in, got, want)
+		}
 	}
 }
