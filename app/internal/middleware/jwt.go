@@ -25,6 +25,9 @@ type Claims struct {
 	Scopes     []string `json:"scopes,omitempty"`   // Permissions: "upload", "read", "delete"
 }
 
+// bearerPrefix introduces a token in the Authorization header.
+const bearerPrefix = "Bearer "
+
 // JWTAuth is middleware for validating JWT tokens.
 type JWTAuth struct {
 	secret []byte
@@ -67,14 +70,14 @@ func (j *JWTAuth) extractClaims(r *http.Request) (*Claims, error) {
 		if err != nil {
 			return nil, errors.New("no token provided")
 		}
-		authHeader = "Bearer " + cookie.Value
+		authHeader = bearerPrefix + cookie.Value
 	}
 
 	// Parse Bearer token
-	if !strings.HasPrefix(authHeader, "Bearer ") {
+	if !strings.HasPrefix(authHeader, bearerPrefix) {
 		return nil, errors.New("invalid authorization header format")
 	}
-	tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+	tokenString := strings.TrimPrefix(authHeader, bearerPrefix)
 
 	// Parse and validate token
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {

@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"encoding/xml"
 
@@ -106,46 +107,70 @@ func probeSVG(r io.Reader) (int, int, error) {
 		if err != nil {
 			return 0, 0, nil
 		}
-		start, ok := tok.(xml.StartElement)
-		if !ok {
-			continue
-		}
-		if strings.EqualFold(start.Name.Local, "svg") {
-			var w, h string
-			var viewBox string
-			for _, a := range start.Attr {
-				switch strings.ToLower(a.Name.Local) {
-				case "width":
-					w = a.Value
-				case "height":
-					h = a.Value
-				case "viewbox":
-					viewBox = a.Value
-				}
-			}
-			wi := parseSvgLen(w)
-			hi := parseSvgLen(h)
-			if wi > 0 && hi > 0 {
-				return wi, hi, nil
-			}
-			if viewBox != "" {
-				parts := strings.Fields(viewBox)
-				if len(parts) == 4 {
-					vw, errW := strconv.ParseFloat(parts[2], 64)
-					vh, errH := strconv.ParseFloat(parts[3], 64)
-					// Guard against degenerate viewBoxes ("0 0 -10 -10",
-					// "0 0 0.4 0.4" rounding to 0, etc). Anything that
-					// can't render as a positive pixel rectangle falls
-					// through to (0, 0) so the caller treats it like an
-					// unknown format.
-					if errW == nil && errH == nil && vw > 0 && vh > 0 {
-						return int(vw), int(vh), nil
-					}
-				}
-			}
-			return 0, 0, nil
+		if start, ok := tok.(xml.StartElement); ok && strings.EqualFold(start.Name.Local, "svg") {
+			w, h := svgRootDims(start)
+			return w, h, nil
 		}
 	}
+}
+
+// svgRootDims reads the size of an <svg> root element: its width and height
+// attributes when both are usable, otherwise its viewBox, otherwise 0x0.
+func svgRootDims(root xml.StartElement) (int, int) {
+	var width, height, viewBox string
+	for _, a := range root.Attr {
+		switch strings.ToLower(a.Name.Local) {
+		case "width":
+			width = a.Value
+		case "height":
+			height = a.Value
+		case "viewbox":
+			viewBox = a.Value
+		}
+	}
+	if w, h := parseSvgLen(width), parseSvgLen(height); w > 0 && h > 0 {
+		return w, h
+	}
+	return viewBoxDims(viewBox)
+}
+
+// viewBoxDims returns the width and height of a viewBox="min-x min-y width
+// height", or 0x0 when it is absent or malformed. The four numbers may be
+// separated by whitespace, commas or both, as the SVG grammar allows.
+func viewBoxDims(viewBox string) (int, int) {
+	parts := strings.FieldsFunc(viewBox, func(r rune) bool {
+		return r == ',' || unicode.IsSpace(r)
+	})
+	if len(parts) != 4 {
+		return 0, 0
+	}
+	vw, errW := strconv.ParseFloat(parts[2], 64)
+	vh, errH := strconv.ParseFloat(parts[3], 64)
+	// Guard against degenerate viewBoxes ("0 0 -10 -10", "0 0 0.4 0.4"
+	// rounding to 0, "0 0 NaN Inf", etc). Anything that can't render as a
+	// positive pixel rectangle comes back as (0, 0) so the caller treats it
+	// like an unknown format.
+	w, h := toPixels(vw), toPixels(vh)
+	if errW != nil || errH != nil || w == 0 || h == 0 {
+		return 0, 0
+	}
+	return w, h
+}
+
+// maxPixels bounds a probed dimension. Far beyond any real image, and well
+// inside int on every platform, so the conversion below is always defined.
+const maxPixels = 1 << 30
+
+// toPixels truncates a parsed length to whole pixels, or returns 0 when it is
+// not a usable size. strconv.ParseFloat accepts "NaN" and "Inf", NaN fails
+// every comparison, and converting NaN, an infinity or an out-of-range value
+// to int is implementation-defined in Go, so the bounds are checked as a
+// single positive condition that NaN cannot satisfy.
+func toPixels(v float64) int {
+	if !(v >= 1 && v <= maxPixels) {
+		return 0
+	}
+	return int(v)
 }
 
 func parseSvgLen(s string) int {
@@ -165,5 +190,5 @@ func parseSvgLen(s string) int {
 	if err != nil {
 		return 0
 	}
-	return int(v)
+	return toPixels(v)
 }

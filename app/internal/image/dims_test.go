@@ -8,6 +8,7 @@ import (
 	"image/gif"
 	"image/jpeg"
 	"image/png"
+	"strings"
 	"testing"
 )
 
@@ -120,3 +121,63 @@ type errReader struct{}
 
 func (errReader) Read([]byte) (int, error)       { return 0, errors.New("boom") }
 func (errReader) Seek(int64, int) (int64, error) { return 0, errors.New("boom") }
+
+func TestViewBoxDims(t *testing.T) {
+	cases := []struct {
+		viewBox string
+		w, h    int
+	}{
+		{"0 0 120 80", 120, 80},
+		{"0,0,120,80", 120, 80},        // commas, as the SVG grammar allows
+		{"0, 0, 120.9, 80.2", 120, 80}, // commas and spaces, fractions truncated
+		{" 0\t0\n120 80 ", 120, 80},
+		{"0 0 -10 -10", 0, 0}, // degenerate
+		{"0 0 0.4 0.4", 0, 0}, // rounds to nothing
+		{"0 0 120", 0, 0},     // too few numbers
+		{"0 0 wide tall", 0, 0},
+		{"0 0 NaN NaN", 0, 0}, // ParseFloat accepts these; NaN fails every comparison
+		{"0 0 Inf 10", 0, 0},
+		{"0 0 120 -Inf", 0, 0},
+		{"0 0 1e300 10", 0, 0},              // would overflow int
+		{"0 0 1073741824 1", 1073741824, 1}, // the largest size accepted
+		{"", 0, 0},
+	}
+	for _, tc := range cases {
+		if w, h := viewBoxDims(tc.viewBox); w != tc.w || h != tc.h {
+			t.Errorf("viewBoxDims(%q) = %dx%d, want %dx%d", tc.viewBox, w, h, tc.w, tc.h)
+		}
+	}
+}
+
+func TestProbeDims_SVG_WidthHeightBeatViewBox(t *testing.T) {
+	svg := `<svg xmlns="http://www.w3.org/2000/svg" width="40px" height="30" viewBox="0,0,400,300"></svg>`
+	w, h, err := ProbeDims(strings.NewReader(svg))
+	if err != nil || w != 40 || h != 30 {
+		t.Errorf("got %dx%d (%v), want 40x30 from width/height", w, h, err)
+	}
+}
+
+func TestProbeDims_SVG_CommaViewBox(t *testing.T) {
+	svg := `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0,0,64,48"></svg>`
+	w, h, err := ProbeDims(strings.NewReader(svg))
+	if err != nil || w != 64 || h != 48 {
+		t.Errorf("got %dx%d (%v), want 64x48", w, h, err)
+	}
+}
+
+func TestParseSvgLenRejectsUnusableSizes(t *testing.T) {
+	cases := map[string]int{
+		"640":                     640,
+		"640px":                   640,
+		"12.9":                    12,
+		"0.5":                     0,
+		"-10":                     0,
+		"":                        0,
+		"99999999999999999999999": 0, // would overflow int
+	}
+	for in, want := range cases {
+		if got := parseSvgLen(in); got != want {
+			t.Errorf("parseSvgLen(%q) = %d, want %d", in, got, want)
+		}
+	}
+}
