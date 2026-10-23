@@ -326,3 +326,38 @@ func TestDeleteRouteAbsentAnswers405(t *testing.T) {
 		t.Error("file removed although deletion is disabled")
 	}
 }
+
+func TestReuploadAfterDeleteClearsTombstone(t *testing.T) {
+	// End to end through the upload handler's moderation hook: delete, then
+	// store identical bytes under the same filename. The path is identical,
+	// so the deleted record must not describe the file that now exists.
+	base := t.TempDir()
+	mod := moderation.NewService(nil, nil, filepath.Join(base, "meta"), filepath.Join(base, "queue"), nil, nil)
+	f := newDeleteFixture(t, mod, time.Hour)
+	rel := f.put(t, "comeback", "again.txt", "")
+
+	if rec := f.do("/files/"+rel, deleteClaims("", "delete")); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete: expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if meta, _ := mod.GetMetadata(rel); meta == nil || meta.Status != moderation.StatusDeleted {
+		t.Fatalf("expected a deleted record after delete, got %+v", meta)
+	}
+
+	again := f.put(t, "comeback", "again.txt", "")
+	if again != rel {
+		t.Fatalf("expected the same path on re-upload, got %q and %q", rel, again)
+	}
+	// The upload handler calls this right after StoreFile.
+	mod.ProcessUpload(again, "", "", true)
+
+	meta, err := mod.GetMetadata(rel)
+	if err != nil {
+		t.Fatalf("GetMetadata: %v", err)
+	}
+	if meta != nil {
+		t.Errorf("deleted record survived the re-upload: %+v", meta)
+	}
+	if !f.exists(rel) {
+		t.Error("re-uploaded file missing")
+	}
+}

@@ -120,6 +120,12 @@ type Service struct {
 	// Background processing
 	mu         sync.Mutex
 	processing map[string]bool // tracks files currently being processed
+
+	// metaMu serializes every read-then-write of a metadata record: scan
+	// results, the deleted tombstone, and its removal on re-upload. Without
+	// it a scan finishing concurrently with a DELETE could read "no record",
+	// then write "clean" over the tombstone the handler had just written.
+	metaMu sync.Mutex
 }
 
 // NewService creates a new moderation service.
@@ -173,6 +179,12 @@ func (s *Service) Enabled() bool {
 // ProcessUpload triggers async scanning for a newly uploaded file.
 // This is non-blocking and runs in a goroutine.
 func (s *Service) ProcessUpload(relativePath, clientCode, sha1 string, isPublic bool) {
+	// Before anything else, and regardless of whether scanning runs: the
+	// path may have been deleted and is now stored again (identical bytes
+	// under the same filename in the same month land on the same path), and
+	// the tombstone from that deletion must not outlive the file's return.
+	s.Stored(relativePath)
+
 	if !s.Enabled() {
 		return
 	}
@@ -265,7 +277,7 @@ func (s *Service) scan(relativePath, clientCode, sha1 string, isPublic bool) {
 				}
 
 				// Save metadata and notify
-				s.saveMetadata(relativePath, meta)
+				s.saveScanResult(relativePath, meta)
 				s.notifier.MalwareAlert(sha1, scopeOf(isPublic), malwareName)
 				return // Don't continue with NSFW scan
 			}
@@ -293,51 +305,57 @@ func (s *Service) scan(relativePath, clientCode, sha1 string, isPublic bool) {
 				// Don't delete, just flag
 				log.Printf("NSFW content flagged: %q (confidence: %.2f)", relativePath, result.Confidence)
 
-				s.saveMetadata(relativePath, meta)
+				s.saveScanResult(relativePath, meta)
 				s.notifier.NSFWAlert(sha1, scopeOf(isPublic), result.Confidence, result.DetectedClasses)
 				return
 			}
 		}
 	}
 
-	// Handle errors - queue for retry
+	// Handle errors - queue for retry. A failure caused by the file having
+	// been deleted mid-scan (the second scanner cannot open it) is not
+	// retried: the record is already the tombstone, and there is nothing
+	// left to scan.
 	if scanErr != nil {
 		errStr := scanErr.Error()
 		meta.Status = StatusError
 		meta.Error = &errStr
-		s.saveMetadata(relativePath, meta)
-		s.queueForRetry(relativePath, clientCode, sha1, isPublic, errStr)
+		if s.saveScanResult(relativePath, meta) {
+			s.queueForRetry(relativePath, clientCode, sha1, isPublic, errStr)
+		}
 		return
 	}
 
-	// All clean. Unless the file was deleted while the scan ran: the scanners
-	// held it open, so they finished on bytes that are no longer stored, and
-	// writing "clean" here would overwrite the "deleted" record MarkDeleted
-	// left behind.
-	if s.fileGone(relativePath) {
-		log.Printf("Scan complete but file was deleted meanwhile, keeping deleted record: %q", relativePath)
-		return
-	}
+	// All clean
 	meta.Status = StatusClean
 	now := time.Now()
 	meta.CompletedAt = &now
-	s.saveMetadata(relativePath, meta)
-	log.Printf("Scan complete (clean): %q", relativePath)
+	if s.saveScanResult(relativePath, meta) {
+		log.Printf("Scan complete (clean): %q", relativePath)
+	}
 }
 
-// fileGone reports whether the stored file is confirmed missing. Only a
-// definite not-exist counts; a transient open failure must not be mistaken
-// for a deletion.
-func (s *Service) fileGone(relativePath string) bool {
-	if s.openFile == nil {
+// saveScanResult writes a scan outcome unless the file was deleted while the
+// scan ran. The scanners hold the file open, so a scan can finish, flag, or
+// fail on bytes that are no longer stored; whatever it concluded must not
+// replace the deleted record MarkDeleted left, or a consumer polling for a
+// verdict would be told "clean" (or "error", and see a retry queued) about a
+// file that is gone. Returns whether the write happened.
+func (s *Service) saveScanResult(relativePath string, meta *Metadata) bool {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+
+	existing, err := s.GetMetadata(relativePath)
+	if err != nil {
+		log.Printf("Could not read existing metadata for %q, writing scan result anyway: %v", relativePath, err)
+	} else if existing != nil && existing.Status == StatusDeleted {
+		log.Printf("Scan finished after deletion, keeping deleted record: %q", relativePath)
 		return false
 	}
-	f, err := s.openFile(relativePath)
-	if err != nil {
-		return os.IsNotExist(err)
+	if err := s.saveMetadata(relativePath, meta); err != nil {
+		log.Printf("Failed to save metadata for %q: %v", relativePath, err)
 	}
-	f.Close()
-	return false
+	return true
 }
 
 // MarkDeleted records that the file was removed through the DELETE endpoint.
@@ -347,6 +365,9 @@ func (s *Service) fileGone(relativePath string) bool {
 // upload, which is not scanned) gets a fresh record so the metadata endpoint
 // answers consistently.
 func (s *Service) MarkDeleted(relativePath string) error {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+
 	meta, err := s.GetMetadata(relativePath)
 	if err != nil {
 		return err
@@ -358,6 +379,26 @@ func (s *Service) MarkDeleted(relativePath string) error {
 	meta.Status = StatusDeleted
 	meta.CompletedAt = &now
 	return s.saveMetadata(relativePath, meta)
+}
+
+// Stored is called whenever a file has been written at relativePath. If a
+// deleted tombstone sits there from an earlier incarnation of the same path,
+// it is removed: the record described a file that no longer existed, and
+// now one does. Any other record is left alone; a deduplicated re-upload
+// found the file present, so its verdict still stands.
+func (s *Service) Stored(relativePath string) {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+
+	existing, err := s.GetMetadata(relativePath)
+	if err != nil || existing == nil || existing.Status != StatusDeleted {
+		return
+	}
+	if err := os.Remove(s.metadataPath(relativePath)); err != nil && !os.IsNotExist(err) {
+		log.Printf("Could not clear deleted record for re-stored %q: %v", relativePath, err)
+		return
+	}
+	log.Printf("Cleared deleted record for re-stored file: %q", relativePath)
 }
 
 // scanMalware and scanNSFW open the stored file through the storage root and

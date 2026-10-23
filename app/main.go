@@ -64,7 +64,7 @@ func main() {
 
 	// Initialize handlers with size limits
 	uploadHandler := handler.NewUploadHandler(store, moderationSvc, cfg.MaxUploadSize, cfg.JWTSecret)
-	fetchHandler := handler.NewFetchHandler(store, cfg.MaxUploadSize, cfg.JWTSecret)
+	fetchHandler := handler.NewFetchHandler(store, moderationSvc, cfg.MaxUploadSize, cfg.JWTSecret)
 	serveHandler := handler.NewServeHandler(store)
 	healthHandler := handler.NewHealthHandler()
 	metaHandler := handler.NewMetaHandler(moderationSvc)

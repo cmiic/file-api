@@ -14,6 +14,7 @@ import (
 	"file-api/internal/auth"
 	"file-api/internal/image"
 	"file-api/internal/middleware"
+	"file-api/internal/moderation"
 	"file-api/internal/storage"
 	"file-api/internal/util"
 )
@@ -22,6 +23,7 @@ import (
 // Despite the name, this no longer resizes - it only fetches and stores the original.
 type FetchHandler struct {
 	storage       *storage.Storage
+	moderation    *moderation.Service // may be nil when moderation is disabled
 	maxUploadSize int64
 	httpClient    *http.Client
 	// jwtSecret is the shared HMAC key for the meta-token. Same
@@ -30,9 +32,10 @@ type FetchHandler struct {
 }
 
 // NewFetchHandler creates a new FetchHandler.
-func NewFetchHandler(s *storage.Storage, maxUploadSize int64, jwtSecret string) *FetchHandler {
+func NewFetchHandler(s *storage.Storage, mod *moderation.Service, maxUploadSize int64, jwtSecret string) *FetchHandler {
 	h := &FetchHandler{
 		storage:       s,
+		moderation:    mod,
 		maxUploadSize: maxUploadSize,
 		jwtSecret:     []byte(jwtSecret),
 	}
@@ -160,6 +163,12 @@ func (h *FetchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "Failed to store file: "+err.Error(), http.StatusInternalServerError)
 		return
+	}
+	// Fetched files are not scanned (see ProcessUpload's callers), but a
+	// fetch can re-create a path that was deleted, and the deleted record
+	// must not outlive the file's return.
+	if h.moderation != nil {
+		h.moderation.Stored(info.RelativePath)
 	}
 
 	// Probe dims server-side. See upload.go for the rationale —
