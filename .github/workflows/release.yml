@@ -59,6 +59,30 @@ jobs:
           docker build --build-arg APP_VERSION="${TAG#v}" -t "${PDF_IMAGE_NAME}:${TAG}" ./pdf-sidecar
           docker push "${PDF_IMAGE_NAME}:${TAG}"
 
+      # An SPDX SBOM of each pushed image, attached to the release below. syft
+      # runs from its official image pinned by digest and scans each image by
+      # the digest the registry now holds, so the SBOM describes exactly what
+      # was released; its name and version are the image and the tag. Bump
+      # syft here by hand: Dependabot does not follow images run in a step.
+      - name: Generate SBOMs
+        env:
+          TAG: ${{ steps.release_tag.outputs.tag }}
+          SYFT_IMAGE: docker.io/anchore/syft:v1.55.0@sha256:4cc92b64ca74ffca4c94d4c8fcc01f217731375300be14d0b6eeb2e82eaa110a
+        run: |
+          set -euo pipefail
+          # syft's image runs as its own user, which must be able to write here.
+          mkdir -p "$RUNNER_TEMP/sbom"
+          chmod 777 "$RUNNER_TEMP/sbom"
+          sbom() {
+            local image="$1" digest
+            digest="$(docker buildx imagetools inspect "${image}:${TAG}" --format '{{.Manifest.Digest}}')"
+            docker run --rm -v "$RUNNER_TEMP/sbom:/out" "$SYFT_IMAGE" scan "registry:${image}@${digest}" \
+              --source-name "$image" --source-version "$TAG" \
+              -o "spdx-json=/out/${image##*/}-${TAG}.spdx.json"
+          }
+          sbom "$API_IMAGE_NAME"
+          sbom "$PDF_IMAGE_NAME"
+
       - name: Resolve PDF sidecar GPL source
         env:
           TAG: ${{ steps.release_tag.outputs.tag }}
@@ -114,3 +138,10 @@ jobs:
           gh release create "$TAG" \
             --title "$release_name" \
             --notes-file "$RUNNER_TEMP/release-notes.md"
+
+      # A step of its own, so the SBOMs are attached even when the release
+      # already existed and the step above stopped early.
+      - name: Attach SBOMs
+        env:
+          TAG: ${{ steps.release_tag.outputs.tag }}
+        run: gh release upload "$TAG" "$RUNNER_TEMP"/sbom/*.spdx.json --clobber

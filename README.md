@@ -4,7 +4,7 @@ A high-performance file management API using Go and imgproxy for on-demand image
 
 ## License
 
-Copyright (c) 2026 Christoph Stadlbauer. File API and its PDF sidecar are licensed under the [MIT License](LICENSE). Both release images include the Go toolchain and module dependency license texts under `/app/THIRD_PARTY_LICENSES`. The PDF sidecar additionally retains Poppler and Debian package notices under `/usr/share/doc` and `/usr/share/common-licenses`. Each GitHub release links the exact Debian Poppler Corresponding Source for the package version in its sidecar image.
+Copyright (c) 2026 Christoph Stadlbauer. File API and its PDF sidecar are licensed under the [MIT License](LICENSE). Both release images include the Go toolchain and module dependency license texts under `/app/THIRD_PARTY_LICENSES`. The PDF sidecar additionally retains Poppler and Debian package notices under `/usr/share/doc` and `/usr/share/common-licenses`. Each GitHub release links the exact Debian Poppler Corresponding Source for the package version in its sidecar image. Each GitHub release also attaches an SPDX SBOM of both images, generated from the published image digests.
 
 ## Architecture
 
