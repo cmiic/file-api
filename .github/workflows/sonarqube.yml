@@ -1,0 +1,81 @@
+name: SonarQube Cloud
+
+# The SonarQube Cloud analysis with the Go tests' coverage: of every pull
+# request from this repository and of main after every merge, so new code
+# on a pull request is measured against the analysed default branch. The
+# properties are in sonar-project.properties.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sonarqube-${{ github.ref }}
+  # A superseded pull request run is worth cancelling; a main run is not, as it
+  # is the baseline every pull request is compared with.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  sonarqube:
+    name: SonarQube
+    # SONAR_TOKEN is not reachable from pull requests that cannot see
+    # repository secrets: forks get none, and Dependabot reads the separate
+    # Dependabot secrets store, which is empty here. The token would resolve to
+    # "" and the scan fail on authentication, a red check on every Dependabot
+    # pull request. Skipping beats failing.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The whole history: new code and blame are assigned from it.
+          fetch-depth: 0
+          # The scanner reads the history fetched here and makes no git network
+          # calls of its own, so the checkout credentials can go.
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache-dependency-path: app/go.sum
+
+      # The scanner reads coverage, it does not produce it. Without these
+      # profiles every changed line counts as uncovered and the new-code
+      # coverage condition fails on any pull request that touches Go.
+      #
+      # Go names files by module path. pdf-sidecar's module is named like its
+      # directory, but the app module is "file-api" in app/, so its prefix is
+      # rewritten to keep every path relative to the repository root, where
+      # sonar-project.properties resolves them.
+      - name: Coverage (file-api)
+        working-directory: app
+        run: |
+          go test -coverprofile=coverage.out ./...
+          sed -i 's#^file-api/#app/#' coverage.out
+
+      - name: Coverage (pdf-sidecar)
+        working-directory: pdf-sidecar
+        run: go test -coverprofile=coverage.out ./...
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
+          restore-keys: ${{ runner.os }}-sonar
+
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
