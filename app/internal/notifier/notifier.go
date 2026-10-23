@@ -170,57 +170,55 @@ func hashOrUnknown(sha1 string) string {
 	return sha1
 }
 
+// fileIdentity is how every alert identifies its file: the content hash and
+// whether it was a public or a client upload. Never the stored path, which
+// embeds the uploader's filename.
+func fileIdentity(sha1, scope string) string {
+	return fmt.Sprintf("SHA1: %s\nScope: %s\n", hashOrUnknown(sha1), scope)
+}
+
 // MalwareAlert sends an alert about a malware detection.
 func (n *Notifier) MalwareAlert(sha1, scope, malwareName string) error {
 	subject := "[file-api] Malware detected and removed"
-	body := fmt.Sprintf("Malware detected in uploaded file.\n\n"+
-		"SHA1: %s\n"+
-		"Scope: %s\n"+
-		"Malware: %s\n"+
-		"Action: File deleted, metadata preserved\n\n"+
-		"%s",
-		hashOrUnknown(sha1),
-		scope,
-		malwareName,
-		fileLocator(sha1),
-	)
+	body := "Malware detected in uploaded file.\n\n" +
+		fileIdentity(sha1, scope) +
+		fmt.Sprintf("Malware: %s\n"+
+			"Action: File deleted, metadata preserved\n\n"+
+			"%s",
+			malwareName,
+			fileLocator(sha1),
+		)
 	return n.SendAlert(subject, body)
 }
 
 // NSFWAlert sends an alert about NSFW content detection.
 func (n *Notifier) NSFWAlert(sha1, scope string, confidence float64, classes []string) error {
 	subject := "[file-api] NSFW content detected"
-	body := fmt.Sprintf("NSFW content detected in uploaded file.\n\n"+
-		"SHA1: %s\n"+
-		"Scope: %s\n"+
-		"Confidence: %.2f\n"+
-		"Classes: %s\n"+
-		"Action: File flagged for review\n\n"+
-		"%s",
-		hashOrUnknown(sha1),
-		scope,
-		confidence,
-		strings.Join(classes, ", "),
-		fileLocator(sha1),
-	)
+	body := "NSFW content detected in uploaded file.\n\n" +
+		fileIdentity(sha1, scope) +
+		fmt.Sprintf("Confidence: %.2f\n"+
+			"Classes: %s\n"+
+			"Action: File flagged for review\n\n"+
+			"%s",
+			confidence,
+			strings.Join(classes, ", "),
+			fileLocator(sha1),
+		)
 	return n.SendAlert(subject, body)
 }
 
 // ScanErrorAlert sends an alert about a scan failure.
 func (n *Notifier) ScanErrorAlert(sha1, scope, scanType, errorMsg string) error {
 	subject := fmt.Sprintf("[file-api] %s scan failed", scanType)
-	body := fmt.Sprintf("Scan failed for uploaded file.\n\n"+
-		"SHA1: %s\n"+
-		"Scope: %s\n"+
-		"Scan type: %s\n"+
-		"Error: %s\n"+
-		"Action: Queued for retry\n\n"+
-		"%s",
-		hashOrUnknown(sha1),
-		scope,
-		scanType,
-		errorMsg,
-		fileLocator(sha1),
-	)
+	body := "Scan failed for uploaded file.\n\n" +
+		fileIdentity(sha1, scope) +
+		fmt.Sprintf("Scan type: %s\n"+
+			"Error: %s\n"+
+			"Action: Queued for retry\n\n"+
+			"%s",
+			scanType,
+			errorMsg,
+			fileLocator(sha1),
+		)
 	return n.SendAlert(subject, body)
 }

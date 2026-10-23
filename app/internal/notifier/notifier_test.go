@@ -165,7 +165,7 @@ func captureSMTP(t *testing.T, send func(n *Notifier)) (raw string, transactions
 
 		say("220 fake ESMTP")
 		var buf strings.Builder
-		cap := capture{}
+		got := capture{}
 		inData := false
 
 		for {
@@ -186,22 +186,22 @@ func captureSMTP(t *testing.T, send func(n *Notifier)) (raw string, transactions
 				say("250-fake")
 				say("250 OK")
 			case strings.HasPrefix(cmd, "MAIL FROM"):
-				cap.transactions++
+				got.transactions++
 				say("250 OK")
 			case strings.HasPrefix(cmd, "DATA"):
 				say("354 send it")
 				inData = true
 			case strings.HasPrefix(cmd, "QUIT"):
 				say("221 bye")
-				cap.raw = buf.String()
-				done <- cap
+				got.raw = buf.String()
+				done <- got
 				return
 			default:
 				say("250 OK")
 			}
 		}
-		cap.raw = buf.String()
-		done <- cap
+		got.raw = buf.String()
+		done <- got
 	}()
 
 	host, port, _ := net.SplitHostPort(ln.Addr().String())
@@ -308,5 +308,14 @@ func TestSendAlertDisabledIsNoOp(t *testing.T) {
 	n := &Notifier{enabled: false}
 	if err := n.SendAlert("subject", "body"); err != nil {
 		t.Errorf("disabled notifier should not error, got %v", err)
+	}
+}
+
+func TestFileIdentity(t *testing.T) {
+	if got, want := fileIdentity("abc123", "public"), "SHA1: abc123\nScope: public\n"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	if got, want := fileIdentity("", "private (client upload)"), "SHA1: (unavailable)\nScope: private (client upload)\n"; got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }

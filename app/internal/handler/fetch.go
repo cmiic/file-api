@@ -1,18 +1,16 @@
 package handler
 
 import (
-	"encoding/json"
 	"fmt"
-	"log"
+	"mime"
 	"net"
 	"net/http"
+	"net/url"
+	"path"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
-	"file-api/internal/auth"
-	"file-api/internal/image"
 	"file-api/internal/middleware"
 	"file-api/internal/moderation"
 	"file-api/internal/storage"
@@ -92,74 +90,38 @@ func (h *FetchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check for upload scope
 	claims := middleware.GetClaims(r)
 	if claims == nil || !claims.HasScope("upload") {
 		http.Error(w, "Forbidden: upload scope required", http.StatusForbidden)
 		return
 	}
 
-	// Extract client code if present
-	clientCode := ""
-	path := r.URL.Path
-
-	// Check for /cli/{code} in API path only (before /url/), not in the destination URL
-	// Private path format: /file-resize/cli/{code}/url/{url}
-	// Public path format: /file-resize/url/{url}
-	urlIdx := strings.Index(path, "/url/")
-	if urlIdx > 0 {
-		apiPrefix := path[:urlIdx]
-		if strings.Contains(apiPrefix, "/cli/") {
-			clientCode = extractClientCodeFromFetchPath(apiPrefix)
-			if clientCode != "" {
-				if !util.IsValidClientCode(clientCode) {
-					http.Error(w, "Der Pfad/Client Code muss alphanumerisch sein", http.StatusBadRequest)
-					return
-				}
-				if claims.ClientCode != clientCode {
-					http.Error(w, "Forbidden", http.StatusForbidden)
-					return
-				}
-			}
-		}
+	clientCode, refusal := fetchClientCode(r.URL.Path, claims)
+	if refusal != nil {
+		http.Error(w, refusal.msg, refusal.status)
+		return
 	}
 
-	// Extract URL from path
-	fetchURL, err := extractURL(path)
+	fetchURL, err := extractURL(r.URL.Path)
 	if err != nil || !util.IsValidURL(fetchURL) {
 		http.Error(w, "No url or not a valid url", http.StatusBadRequest)
 		return
 	}
 
-	// Fallback dimensions from form fields (kept for backward compat
-	// with legacy clients that don't read the new meta_token field).
-	// The probe below overrides them when it recognises the format.
-	formOrigWidth, _ := strconv.Atoi(r.FormValue("orig_width"))
-	formOrigHeight, _ := strconv.Atoi(r.FormValue("orig_height"))
-	thumbWidth, _ := strconv.Atoi(r.FormValue("thumb_width"))
-	thumbHeight, _ := strconv.Atoi(r.FormValue("thumb_height"))
+	// Dimensions posted with the request, kept for legacy clients: a fallback
+	// for formats the probe cannot read, and pass-through thumbnail values.
+	dims := readFormDims(r)
 
-	// Fetch the file from URL
-	resp, err := h.httpClient.Get(fetchURL)
+	resp, err := h.download(fetchURL)
 	if err != nil {
 		http.Error(w, "This file cannot be downloaded", http.StatusBadRequest)
 		return
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		http.Error(w, "This file cannot be downloaded", http.StatusBadRequest)
-		return
-	}
-
-	// Extract filename from URL or Content-Disposition header
+	// Store the fetched content, bounded by the same size limit as an upload.
 	filename := extractFilenameFromResponse(resp, fetchURL)
-
-	// Enforce size limit on fetched content
-	limitedBody := http.MaxBytesReader(w, resp.Body, h.maxUploadSize)
-
-	// Store the file
-	info, err := h.storage.StoreFile(limitedBody, filename, clientCode)
+	info, err := h.storage.StoreFile(http.MaxBytesReader(w, resp.Body, h.maxUploadSize), filename, clientCode)
 	if err != nil {
 		http.Error(w, "Failed to store file: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -171,42 +133,52 @@ func (h *FetchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.moderation.Stored(info.RelativePath)
 	}
 
-	// Probe dims server-side. See upload.go for the rationale —
-	// same fallback rules: probe wins on a recognised format, form
-	// fields win when the probe returns zero.
-	origWidth, origHeight := formOrigWidth, formOrigHeight
-	if f, oErr := h.storage.Open(info.RelativePath); oErr != nil {
-		log.Printf("[fetch] open for probe %q: %v", info.RelativePath, oErr)
-	} else {
-		pw, ph, perr := image.ProbeDims(f)
-		f.Close()
-		if perr != nil {
-			log.Printf("[fetch] probe %q: %v", info.RelativePath, perr)
-		}
-		if pw > 0 && ph > 0 {
-			origWidth, origHeight = pw, ph
-		}
-	}
-	metaToken, mErr := auth.Mint(h.jwtSecret, info.RelativePath, info.Size, origWidth, origHeight)
-	if mErr != nil {
-		log.Printf("[fetch] mint meta_token: %v", mErr)
-	}
+	// Same probe and response as an upload, see upload.go.
+	dims.origWidth, dims.origHeight = probeStoredDims(h.storage, info.RelativePath, dims.origWidth, dims.origHeight, "[fetch]")
+	writeStoredResponse(w, h.jwtSecret, info, dims, "[fetch]")
+}
 
-	// Build response
-	response := UploadResponse{
-		Orig: OrigInfo{
-			Name:        info.RelativePath,
-			Size:        info.Size,
-			OrigWidth:   origWidth,
-			OrigHeight:  origHeight,
-			ThumbWidth:  thumbWidth,
-			ThumbHeight: thumbHeight,
-		},
-		MetaToken: metaToken,
-	}
+// httpError is a refusal a helper decided on and the handler writes.
+type httpError struct {
+	status int
+	msg    string
+}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+// fetchClientCode returns the client code of a private fetch, "" for a public
+// one, or the refusal to answer with. The code is looked for only in the API
+// part of the path, before /url/, never in the destination URL that follows.
+//
+//	public:  /file-resize/url/{url}
+//	private: /file-resize/cli/{code}/url/{url}
+func fetchClientCode(path string, claims *middleware.Claims) (string, *httpError) {
+	urlIdx := strings.Index(path, "/url/")
+	if urlIdx <= 0 || !strings.Contains(path[:urlIdx], "/cli/") {
+		return "", nil
+	}
+	code := extractClientCodeFromFetchPath(path[:urlIdx])
+	switch {
+	case code == "":
+		return "", nil
+	case !util.IsValidClientCode(code):
+		return "", &httpError{http.StatusBadRequest, "Der Pfad/Client Code muss alphanumerisch sein"}
+	case claims.ClientCode != code:
+		return "", &httpError{http.StatusForbidden, msgForbidden}
+	}
+	return code, nil
+}
+
+// download GETs fetchURL through the guarded client. Anything but a 200 is an
+// error, with the body already closed.
+func (h *FetchHandler) download(fetchURL string) (*http.Response, error) {
+	resp, err := h.httpClient.Get(fetchURL)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
+	}
+	return resp, nil
 }
 
 // extractURL extracts the URL from the request path.
@@ -245,49 +217,60 @@ func extractClientCodeFromFetchPath(path string) string {
 	return rest[:endIdx]
 }
 
-// extractFilenameFromResponse extracts a filename from HTTP response or URL.
-func extractFilenameFromResponse(resp *http.Response, url string) string {
-	// Try Content-Disposition header first
-	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
-		if strings.Contains(cd, "filename=") {
-			// Extract filename from header
-			parts := strings.Split(cd, "filename=")
-			if len(parts) > 1 {
-				filename := strings.Trim(parts[1], `"' `)
-				if filename != "" {
-					return filename
-				}
-			}
-		}
+// extractFilenameFromResponse names a fetched file: from the response's
+// Content-Disposition, else from the URL's last path segment, else from its
+// Content-Type. The name is sanitised by StoreFile either way.
+func extractFilenameFromResponse(resp *http.Response, rawURL string) string {
+	if name := filenameFromDisposition(resp.Header.Get("Content-Disposition")); name != "" {
+		return name
 	}
+	if name := filenameFromURL(rawURL); name != "" {
+		return name
+	}
+	return defaultFilename(resp.Header.Get("Content-Type"))
+}
 
-	// Extract from URL path
-	lastSlash := strings.LastIndex(url, "/")
-	if lastSlash >= 0 && lastSlash < len(url)-1 {
-		filename := url[lastSlash+1:]
-		// Remove query string if present
-		if queryIdx := strings.Index(filename, "?"); queryIdx > 0 {
-			filename = filename[:queryIdx]
-		}
-		if filename != "" {
-			return filename
-		}
+// filenameFromDisposition returns the filename parameter of a
+// Content-Disposition header, or "". mime.ParseMediaType handles quoting,
+// further parameters after the filename, and the RFC 2231 encoded form, which
+// it decodes into "filename":
+//
+//	attachment; filename*=UTF-8''r%C3%A9sum%C3%A9.pdf
+func filenameFromDisposition(header string) string {
+	if header == "" {
+		return ""
 	}
+	_, params, err := mime.ParseMediaType(header)
+	if err != nil {
+		return ""
+	}
+	return params["filename"]
+}
 
-	// Default filename based on content type
-	contentType := resp.Header.Get("Content-Type")
-	switch {
-	case strings.Contains(contentType, "image/jpeg"):
-		return "download.jpg"
-	case strings.Contains(contentType, "image/png"):
-		return "download.png"
-	case strings.Contains(contentType, "image/gif"):
-		return "download.gif"
-	case strings.Contains(contentType, "image/webp"):
-		return "download.webp"
-	case strings.Contains(contentType, "application/pdf"):
-		return "download.pdf"
-	default:
-		return "download.bin"
+// filenameFromURL returns the last segment of the URL's path, without query or
+// fragment, or "" when the path is empty or ends in a slash.
+func filenameFromURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Path == "" || strings.HasSuffix(u.Path, "/") {
+		return ""
 	}
+	return path.Base(u.Path)
+}
+
+// defaultNames picks a filename by content type when nothing better is known.
+var defaultNames = []struct{ contentType, name string }{
+	{"image/jpeg", "download.jpg"},
+	{"image/png", "download.png"},
+	{"image/gif", "download.gif"},
+	{"image/webp", "download.webp"},
+	{"application/pdf", "download.pdf"},
+}
+
+func defaultFilename(contentType string) string {
+	for _, d := range defaultNames {
+		if strings.Contains(contentType, d.contentType) {
+			return d.name
+		}
+	}
+	return "download.bin"
 }
