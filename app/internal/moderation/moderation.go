@@ -99,6 +99,21 @@ func scopeOf(isPublic bool) string {
 	return "private (client upload)"
 }
 
+// alerter is what the scan needs from the notifier: one alert per verdict that
+// needs a human. An interface rather than *notifier.Notifier so tests can
+// record the alerts a scan raises.
+type alerter interface {
+	MalwareAlert(sha1, scope, malwareName string) error
+	NSFWAlert(sha1, scope string, confidence float64, classes []string) error
+}
+
+// noAlerts stands in when no notifier is supplied, so a Service built without
+// one never dereferences a nil pointer.
+type noAlerts struct{}
+
+func (noAlerts) MalwareAlert(string, string, string) error         { return nil }
+func (noAlerts) NSFWAlert(string, string, float64, []string) error { return nil }
+
 // DeleteFunc is a function type for deleting files.
 type DeleteFunc func(relativePath string) error
 
@@ -111,7 +126,7 @@ type OpenFunc func(relativePath string) (*os.File, error)
 // Service orchestrates scanning, metadata storage, and notifications.
 type Service struct {
 	scanner    *scanner.Client
-	notifier   *notifier.Notifier
+	notifier   alerter
 	metaPath   string
 	queuePath  string
 	deleteFile DeleteFunc
@@ -146,12 +161,18 @@ func NewService(
 
 	s := &Service{
 		scanner:    scannerClient,
-		notifier:   notifier,
 		metaPath:   metaPath,
 		queuePath:  queuePath,
 		deleteFile: deleteFile,
 		openFile:   openFile,
 		processing: make(map[string]bool),
+	}
+	// A nil *notifier.Notifier stored in the interface would be a non-nil
+	// interface holding a nil pointer, so it is checked before assignment.
+	if notifier != nil {
+		s.notifier = notifier
+	} else {
+		s.notifier = noAlerts{}
 	}
 
 	// Start the background queue processor only when there is something to
