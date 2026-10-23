@@ -86,6 +86,31 @@ func statRegularFile(w http.ResponseWriter, s *storage.Storage, path, logPrefix 
 	return info, true
 }
 
+// openRegularFile opens path for serving and answers the request itself unless
+// it is a regular file: 404 for a missing file or a directory, a logged 500
+// otherwise. It stats the open file rather than the path, so the checks and
+// the bytes served come from one lookup: a file removed concurrently is a
+// clean 404 before the caller has set any header. The caller closes f.
+func openRegularFile(w http.ResponseWriter, s *storage.Storage, path, logPrefix string) (f *os.File, info os.FileInfo, ok bool) {
+	f, err := s.Open(path)
+	if err != nil {
+		writeFileError(w, err, logPrefix, "open", path)
+		return nil, nil, false
+	}
+	info, err = f.Stat()
+	if err != nil {
+		f.Close()
+		writeFileError(w, err, logPrefix, "stat", path)
+		return nil, nil, false
+	}
+	if info.IsDir() {
+		f.Close()
+		http.Error(w, msgNotFound, http.StatusNotFound)
+		return nil, nil, false
+	}
+	return f, info, true
+}
+
 // formDims are the dimensions a client may post alongside an upload or fetch.
 // The original's are only a fallback for formats the server-side probe cannot
 // read; the thumbnail's are passed through untouched, as they always were.

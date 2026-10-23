@@ -55,29 +55,21 @@ func (h *ServeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Stat through the storage root: a name that escapes it fails here rather
-	// than reaching the filesystem.
-	info, ok := statRegularFile(w, h.storage, path, "[serve]")
+	// Open through the storage root: a name that escapes it fails here rather
+	// than reaching the filesystem. The headers below are set only once the
+	// file is open, so an error response never carries the year-long public
+	// cache header.
+	f, info, ok := openRegularFile(w, h.storage, path, "[serve]")
 	if !ok {
 		return
 	}
+	defer f.Close()
 	setContentHeaders(w, path, storage.IsPrivatePath(path))
 
-	// Serve the file through the storage root.
-	//
 	// ServeContent rather than ServeFile: ServeFile takes a path and opens it
 	// itself, outside the root, which would give up the guarantee this handler
-	// just established by statting through it. ServeContent takes the open
+	// just established by opening through it. ServeContent takes the open
 	// file and still provides Range and conditional-request handling.
-	f, err := h.storage.Open(path)
-	if err != nil {
-		// A file that vanished since the Stat is a 404; anything else is a
-		// server-side failure, not reported as though the file were absent.
-		writeFileError(w, err, "[serve]", "open", path)
-		return
-	}
-	defer f.Close()
-
 	http.ServeContent(w, r, path, info.ModTime(), f)
 }
 

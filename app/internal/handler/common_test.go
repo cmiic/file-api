@@ -123,3 +123,28 @@ func TestProbeStoredDims(t *testing.T) {
 		t.Errorf("missing file: got %dx%d, want the fallback 7x9", w, h)
 	}
 }
+
+func TestOpenRegularFile(t *testing.T) {
+	s := newTestStorage(t)
+	info, err := s.StoreFile(strings.NewReader("x"), "a.txt", "")
+	if err != nil {
+		t.Fatalf("StoreFile: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	f, fi, ok := openRegularFile(rec, s, info.RelativePath, "[test]")
+	if !ok || f == nil || fi.Size() != 1 {
+		t.Fatalf("a stored file was refused: ok=%v code=%d", ok, rec.Code)
+	}
+	f.Close()
+
+	for _, p := range []string{"2026", "nope.txt"} {
+		rec := httptest.NewRecorder()
+		if _, _, ok := openRegularFile(rec, s, p, "[test]"); ok || rec.Code != http.StatusNotFound {
+			t.Errorf("%q: ok=%v code=%d, want refused with 404", p, ok, rec.Code)
+		}
+		if rec.Header().Get("Cache-Control") != "" {
+			t.Errorf("%q: the refusal carries a cache header", p)
+		}
+	}
+}
