@@ -204,3 +204,37 @@ func TestMarkDeletedSkipsWhenFileIsPresent(t *testing.T) {
 		t.Errorf("an absent file got no deleted record: %+v (%v)", meta, err)
 	}
 }
+
+// TestStoredKeepsTombstoneWhenFileIsAbsent is the regression test for a
+// DELETE landing between a caller's StoreFile and its Stored call: the file
+// is gone again and the record it would clear is the current truth.
+func TestStoredKeepsTombstoneWhenFileIsAbsent(t *testing.T) {
+	base := t.TempDir()
+	files := filepath.Join(base, "files")
+	if err := os.MkdirAll(filepath.Join(files, "2026", "1"), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	open := func(rel string) (*os.File, error) { return os.Open(filepath.Join(files, rel)) }
+	svc := NewService(nil, nil, filepath.Join(base, "meta"), filepath.Join(base, "queue"), nil, open)
+
+	const absent = "2026/1/gone-again.jpg"
+	if err := svc.MarkDeleted(absent); err != nil {
+		t.Fatalf("MarkDeleted: %v", err)
+	}
+	svc.Stored(absent)
+	if meta, err := svc.GetMetadata(absent); err != nil || meta == nil || meta.Status != StatusDeleted {
+		t.Errorf("tombstone cleared although the file is absent: %+v (%v)", meta, err)
+	}
+
+	const present = "2026/1/really-back.jpg"
+	if err := svc.MarkDeleted(present); err != nil {
+		t.Fatalf("MarkDeleted: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(files, present), []byte("back"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	svc.Stored(present)
+	if meta, err := svc.GetMetadata(present); err != nil || meta != nil {
+		t.Errorf("tombstone kept although the file is present: %+v (%v)", meta, err)
+	}
+}

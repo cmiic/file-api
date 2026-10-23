@@ -378,7 +378,7 @@ func (s *Service) MarkDeleted(relativePath string) error {
 	s.metaMu.Lock()
 	defer s.metaMu.Unlock()
 
-	if s.fileReturned(relativePath) {
+	if present, known := s.filePresent(relativePath); known && present {
 		log.Printf("File was stored again before its deleted record was written, leaving no record: %q", relativePath)
 		return nil
 	}
@@ -396,19 +396,20 @@ func (s *Service) MarkDeleted(relativePath string) error {
 	return s.saveMetadata(relativePath, meta)
 }
 
-// fileReturned reports whether a file is present at relativePath. Without an
-// opener there is nothing to check and the answer is no, so a Service built
-// for metadata only still writes the record.
-func (s *Service) fileReturned(relativePath string) bool {
+// filePresent reports whether a file is present at relativePath. known is
+// false when the Service has no opener (a metadata-only Service, as the
+// handler tests build) or the open failed for a reason other than absence;
+// callers then proceed as they would without the check rather than guess.
+func (s *Service) filePresent(relativePath string) (present, known bool) {
 	if s.openFile == nil {
-		return false
+		return false, false
 	}
 	f, err := s.openFile(relativePath)
 	if err != nil {
-		return false
+		return false, os.IsNotExist(err)
 	}
 	f.Close()
-	return true
+	return true, true
 }
 
 // Stored is called whenever a file has been written at relativePath. If a
@@ -416,12 +417,22 @@ func (s *Service) fileReturned(relativePath string) bool {
 // it is removed: the record described a file that no longer existed, and
 // now one does. Any other record is left alone; a deduplicated re-upload
 // found the file present, so its verdict still stands.
+//
+// The mirror of MarkDeleted's check: a DELETE that lands between the
+// caller's StoreFile and this call has removed the file again and written
+// the record this would clear, so the record is only removed while the file
+// is confirmed present. Both checks run under metaMu, so the two paths see
+// each other's writes in order.
 func (s *Service) Stored(relativePath string) {
 	s.metaMu.Lock()
 	defer s.metaMu.Unlock()
 
 	existing, err := s.GetMetadata(relativePath)
 	if err != nil || existing == nil || existing.Status != StatusDeleted {
+		return
+	}
+	if present, known := s.filePresent(relativePath); known && !present {
+		log.Printf("File was deleted again before its re-store was recorded, keeping deleted record: %q", relativePath)
 		return
 	}
 	if err := os.Remove(s.metadataPath(relativePath)); err != nil && !os.IsNotExist(err) {
