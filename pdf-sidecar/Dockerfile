@@ -4,18 +4,27 @@ WORKDIR /app
 
 COPY go.mod ./
 RUN go mod download
-RUN mkdir -p /third-party-licenses/go /third-party-licenses/modules \
+# Collect the license texts of the Go toolchain and every module. license_files
+# names the files of one module directory that count as its license; any
+# further arguments are handed to find, so the same selection both checks that
+# a module has a license and copies it.
+RUN license_files() { \
+        dir="$1"; shift; \
+        find "$dir" -maxdepth 1 -type f \
+            \( -iname 'LICENSE*' -o -iname 'COPYING*' -o -iname 'NOTICE*' -o -iname 'PATENTS*' \) "$@"; \
+    }; \
+    mkdir -p /third-party-licenses/go /third-party-licenses/modules \
     && cp /usr/local/go/LICENSE /usr/local/go/PATENTS /third-party-licenses/go/ \
     && go list -m -f '{{if .Version}}{{.Path}}|{{.Version}}|{{.Dir}}{{end}}' all > /tmp/modules.txt \
     && while IFS='|' read -r module version directory; do \
         if test -z "$module"; then continue; fi; \
         if test -z "$directory"; then echo "Missing module directory: $module $version" >&2; exit 1; fi; \
         destination="$(printf '%s' "$module" | tr '/.' '__')-$version"; \
-        licenses="$(find "$directory" -maxdepth 1 -type f \( -iname 'LICENSE*' -o -iname 'COPYING*' -o -iname 'NOTICE*' -o -iname 'PATENTS*' \))"; \
-        if test -z "$licenses"; then echo "Missing module license: $module $version" >&2; exit 1; fi; \
+        if test -z "$(license_files "$directory")"; then \
+            echo "Missing module license: $module $version" >&2; exit 1; \
+        fi; \
         mkdir -p "/third-party-licenses/modules/$destination"; \
-        find "$directory" -maxdepth 1 -type f \( -iname 'LICENSE*' -o -iname 'COPYING*' -o -iname 'NOTICE*' -o -iname 'PATENTS*' \) \
-            -exec cp -t "/third-party-licenses/modules/$destination" {} +; \
+        license_files "$directory" -exec cp -t "/third-party-licenses/modules/$destination" {} +; \
     done < /tmp/modules.txt \
     && { go version; cut -d '|' -f 1,2 /tmp/modules.txt | tr '|' ' '; } > /third-party-licenses/NOTICE.txt
 
@@ -40,10 +49,15 @@ LABEL org.opencontainers.image.source="https://github.com/cmiic/file-api" \
 # Create non-root user
 RUN groupadd -r pdfsidecar && useradd -r -g pdfsidecar pdfsidecar
 
-RUN apt update && apt install -y \
+# Recommended packages are left out except poppler-data, the one Poppler
+# needs: its CMaps render text in CJK and other predefined encodings that a
+# PDF does not embed. The rest would be GnuPG tools, Kerberos, LDAP and SASL
+# plugins and bash completion that nothing here uses.
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     poppler-utils \
+    poppler-data \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/pdf-sidecar .
