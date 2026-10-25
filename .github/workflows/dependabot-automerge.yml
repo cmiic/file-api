@@ -23,7 +23,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           quarantine-days: "1"
           # Only these image repositories may auto-merge; list new base images here.
-          trusted-images: docker.io/library/golang,docker.io/library/debian,docker.io/clamav/clamav,ghcr.io/cmiic/malware-scanner-api,ghcr.io/cmiic/media-screener-api
+          trusted-images: docker.io/library/golang,docker.io/library/debian,docker.io/clamav/clamav,ghcr.io/cmiic/malware-scanner-api,ghcr.io/cmiic/media-screener-api,ghcr.io/imgproxy/imgproxy
           allowed-ecosystems: github_actions,devcontainers,docker,docker_compose
 
       - if: steps.evaluate.outputs.candidate == 'true' && steps.evaluate.outputs.quarantine-passed == 'true'
