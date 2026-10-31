@@ -180,8 +180,28 @@ func TestUploadStreamsTheFilePartWithoutATempFile(t *testing.T) {
 	if len(files) != 1 || files[0] != resp.Orig.Name {
 		t.Fatalf("stored %v, want exactly %q", files, resp.Orig.Name)
 	}
-	if st, err := os.Stat(filepath.Join(dir, files[0])); err != nil || st.Size() != int64(len(content)) {
-		t.Errorf("stored file: %v, size %d", err, st.Size())
+	st, err := os.Stat(filepath.Join(dir, files[0]))
+	if err != nil {
+		t.Fatalf("stat stored file: %v", err)
+	}
+	if st.Size() != int64(len(content)) {
+		t.Errorf("stored file size %d, want %d", st.Size(), len(content))
+	}
+}
+
+// Dimensions in the URL query are read as FormValue read them: a body field
+// of the same name wins, the query stands in where the body has none.
+func TestUploadReadsDimensionsFromTheQueryAsAFallback(t *testing.T) {
+	h := NewUploadHandler(newTestStorage(t), nil, 4096, testSecret)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, uploadRequest(t, "/file-upload?orig_width=640&orig_height=480&thumb_width=5", "a.bin", []byte("x"),
+		map[string]string{"orig_width": "320"}, &middleware.Claims{Scopes: []string{"upload"}}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
+	}
+	resp := decodeStored(t, rec)
+	if resp.Orig.OrigWidth != 320 || resp.Orig.OrigHeight != 480 || resp.Orig.ThumbWidth != 5 {
+		t.Errorf("response %+v, want body 320 over query 640, and 480 and 5 from the query", resp.Orig)
 	}
 }
 

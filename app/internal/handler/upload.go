@@ -102,8 +102,8 @@ func (h *UploadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// A declared length over the limit is refused before a byte is read.
-	// MaxBytesReader below is the enforcement for bodies of unknown or
-	// understated length; this only spares the volume the partial write.
+	// The MaxBytesReader set above is the enforcement for bodies of unknown
+	// or understated length; this only spares the volume the partial write.
 	if r.ContentLength > h.maxUploadSize {
 		http.Error(w, "File too large", http.StatusRequestEntityTooLarge)
 		return
@@ -116,8 +116,16 @@ func (h *UploadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Dimensions posted with the upload: a fallback for formats the probe
-	// cannot read, and pass-through thumbnail values.
-	dims := dimsFromValues(fields.Get)
+	// cannot read, and pass-through thumbnail values. A body field wins over
+	// the same name in the URL query, as FormValue had it; the query is kept
+	// as the fallback it always was.
+	query := r.URL.Query()
+	dims := dimsFromValues(func(field string) string {
+		if v := fields.Get(field); v != "" {
+			return v
+		}
+		return query.Get(field)
+	})
 
 	// Probe dims server-side from the persisted bytes; the form values only
 	// stand in when the format is not recognised.
