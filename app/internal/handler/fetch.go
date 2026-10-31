@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"fmt"
 	"mime"
 	"net"
@@ -82,6 +83,14 @@ func NewFetchHandler(s *storage.Storage, mod *moderation.Service, maxUploadSize 
 // URL extraction pattern - matches /url/ followed by the URL
 var urlPattern = regexp.MustCompile(`/url/(.+)$`)
 
+// fetchFormLimit bounds the request body of a fetch. The body carries at most
+// the four small integers readFormDims looks for; the bytes to store come from
+// the remote URL and are bounded separately, by MAX_UPLOAD_SIZE. Without a
+// bound of its own the body would be parsed whatever its size - a multipart
+// one spilled to disk - before the download even started, by a caller who
+// only needs the upload scope.
+const fetchFormLimit = 64 << 10
+
 // ServeHTTP handles POST /file-resize and POST /file-resize/cli/{code}
 // URL format: /file-resize/url/{url} or /file-resize/cli/{code}/url/{url}
 func (h *FetchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -89,6 +98,9 @@ func (h *FetchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	// Bound the request body before anything reads it; see fetchFormLimit.
+	r.Body = http.MaxBytesReader(w, r.Body, fetchFormLimit)
 
 	claims := middleware.GetClaims(r)
 	if claims == nil || !claims.HasScope("upload") {
@@ -110,6 +122,12 @@ func (h *FetchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Dimensions posted with the request, kept for legacy clients: a fallback
 	// for formats the probe cannot read, and pass-through thumbnail values.
+	// Parsed explicitly first, so that a body over the limit is refused
+	// rather than read as an empty form, which is how FormValue reports it.
+	if refusal := parseFetchForm(r); refusal != nil {
+		http.Error(w, refusal.msg, refusal.status)
+		return
+	}
 	dims := readFormDims(r)
 
 	resp, err := h.download(fetchURL)
@@ -126,11 +144,12 @@ func (h *FetchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to store file: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// Fetched files are not scanned (see ProcessUpload's callers), but a
-	// fetch can re-create a path that was deleted, and the deleted record
-	// must not outlive the file's return.
+	// Moderated exactly like an upload: the bytes came from wherever the
+	// caller pointed, which makes them no more trustworthy than bytes the
+	// caller sent directly. ProcessUpload also clears a deleted record the
+	// path may carry from an earlier incarnation, scanner or no scanner.
 	if h.moderation != nil {
-		h.moderation.Stored(info.RelativePath)
+		h.moderation.ProcessUpload(info.RelativePath, clientCode, info.SHA1, clientCode == "")
 	}
 
 	// Same probe and response as an upload, see upload.go.
@@ -165,6 +184,32 @@ func fetchClientCode(path string, claims *middleware.Claims) (string, *httpError
 		return "", &httpError{http.StatusForbidden, msgForbidden}
 	}
 	return code, nil
+}
+
+// parseFetchForm parses the optional dimension fields of a fetch request, or
+// returns the refusal to answer with. The body may be form-encoded, multipart,
+// or absent; only a body over fetchFormLimit (413) or one that does not parse
+// (400) is refused.
+//
+// ParseForm runs on its own first: ParseMultipartForm calls it too, but on a
+// body that is not multipart it returns ErrNotMultipart in place of whatever
+// ParseForm reported, and an oversized form-encoded body would pass as empty.
+func parseFetchForm(r *http.Request) *httpError {
+	err := r.ParseForm()
+	if err == nil {
+		err = r.ParseMultipartForm(fetchFormLimit)
+		if errors.Is(err, http.ErrNotMultipart) {
+			err = nil
+		}
+	}
+	if err == nil {
+		return nil
+	}
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		return &httpError{http.StatusRequestEntityTooLarge, "Request body too large"}
+	}
+	return &httpError{http.StatusBadRequest, "Failed to parse form"}
 }
 
 // download GETs fetchURL through the guarded client. Anything but a 200 is an

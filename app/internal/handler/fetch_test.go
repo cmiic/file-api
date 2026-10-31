@@ -1,14 +1,21 @@
 package handler
 
 import (
+	"bytes"
 	"context"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"file-api/internal/middleware"
+	"file-api/internal/moderation"
+	"file-api/internal/scanner"
 )
 
 // TestFetchClientIgnoresEnvironmentProxy pins the reason transport.Proxy is
@@ -76,6 +83,113 @@ func TestFetchStoresProbesAndSigns(t *testing.T) {
 	}
 	if resp.Orig.OrigWidth != 24 || resp.Orig.OrigHeight != 12 {
 		t.Errorf("probe: got %dx%d", resp.Orig.OrigWidth, resp.Orig.OrigHeight)
+	}
+}
+
+// TestFetchBoundsItsRequestBody pins the limit on the request body, which
+// carries only the optional dimension fields. An oversized body - form-encoded
+// or multipart - is refused with 413 before the download starts; a small one
+// still delivers its fields.
+func TestFetchBoundsItsRequestBody(t *testing.T) {
+	var downloads atomic.Int32
+	h, base := newFetchTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		downloads.Add(1)
+		w.Write([]byte("fetched bytes"))
+	})
+	claims := &middleware.Claims{Scopes: []string{"upload"}}
+	target := "/file-resize/url/" + base + "/a.bin"
+
+	bigForm := strings.NewReader("thumb_width=8&pad=" + strings.Repeat("x", fetchFormLimit))
+	req := withClaims(httptest.NewRequest(http.MethodPost, target, bigForm), claims)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("oversized form: got %d, want 413", rec.Code)
+	}
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, err := mw.CreateFormFile("file", "big.bin")
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	part.Write(bytes.Repeat([]byte("x"), fetchFormLimit))
+	mw.Close()
+	req = withClaims(httptest.NewRequest(http.MethodPost, target, &body), claims)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("oversized multipart: got %d, want 413", rec.Code)
+	}
+	if downloads.Load() != 0 {
+		t.Error("a download started before the oversized request body was refused")
+	}
+
+	req = withClaims(httptest.NewRequest(http.MethodPost, target, strings.NewReader("thumb_width=8&thumb_height=6")), claims)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("small form: got %d: %s", rec.Code, rec.Body.String())
+	}
+	if resp := decodeStored(t, rec); resp.Orig.ThumbWidth != 8 || resp.Orig.ThumbHeight != 6 {
+		t.Errorf("form fields lost: got %dx%d", resp.Orig.ThumbWidth, resp.Orig.ThumbHeight)
+	}
+}
+
+// TestFetchModeratesLikeAnUpload pins that a fetched file goes through the
+// same moderation as an uploaded one: a public fetch is scanned, a private
+// fetch is not. Fetched bytes come from wherever the caller pointed, so
+// leaving them out of scanning would make the fetch endpoint the way around it.
+func TestFetchModeratesLikeAnUpload(t *testing.T) {
+	var scans atomic.Int32
+	scannerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		scans.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"infected":false,"scan_time_ms":1}`))
+	}))
+	t.Cleanup(scannerSrv.Close)
+
+	h, base := newFetchTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("fetched bytes"))
+	})
+	dir := t.TempDir()
+	h.moderation = moderation.NewService(scanner.NewClient(scannerSrv.URL, "", 5000), nil,
+		filepath.Join(dir, "meta"), filepath.Join(dir, "queue"), h.storage.DeleteFile, h.storage.Open)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, fetchRequest("/file-resize/url/"+base+"/public.bin", &middleware.Claims{Scopes: []string{"upload"}}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("public fetch: got %d: %s", rec.Code, rec.Body.String())
+	}
+	public := decodeStored(t, rec).Orig.Name
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, fetchRequest("/file-resize/cli/ACME/url/"+base+"/private.bin", &middleware.Claims{Scopes: []string{"upload"}, ClientCode: "ACME"}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("private fetch: got %d: %s", rec.Code, rec.Body.String())
+	}
+	private := decodeStored(t, rec).Orig.Name
+
+	// The scan runs in the background; wait for its record.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		m, err := h.moderation.GetMetadata(public)
+		if err == nil && m != nil && m.Status == moderation.StatusClean {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the public fetch was not scanned: record %+v, err %v", m, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if scans.Load() != 1 {
+		t.Errorf("scanner calls %d, want 1: a private fetch is not scanned automatically", scans.Load())
+	}
+	if m, _ := h.moderation.GetMetadata(private); m != nil {
+		t.Errorf("the private fetch got a scan record: %+v", m)
 	}
 }
 
