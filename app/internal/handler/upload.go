@@ -3,7 +3,10 @@ package handler
 
 import (
 	"errors"
+	"io"
+	"mime/multipart"
 	"net/http"
+	"net/url"
 
 	"file-api/internal/middleware"
 	"file-api/internal/moderation"
@@ -98,36 +101,31 @@ func (h *UploadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Parse multipart form
-	if err := r.ParseMultipartForm(32 << 20); err != nil { // 32MB max memory
-		// Check if error is due to size limit
-		var maxBytesErr *http.MaxBytesError
-		if errors.As(err, &maxBytesErr) {
-			http.Error(w, "File too large", http.StatusRequestEntityTooLarge)
-			return
-		}
-		http.Error(w, "Failed to parse multipart form", http.StatusBadRequest)
+	// A declared length over the limit is refused before a byte is read.
+	// The MaxBytesReader set above is the enforcement for bodies of unknown
+	// or understated length; this only spares the volume the partial write.
+	if r.ContentLength > h.maxUploadSize {
+		http.Error(w, "File too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 
-	// Get the file from the form
-	file, header, err := r.FormFile("file")
-	if err != nil {
-		http.Error(w, "No file provided", http.StatusBadRequest)
+	info, fields, refusal := h.storeMultipart(r, clientCode)
+	if refusal != nil {
+		http.Error(w, refusal.msg, refusal.status)
 		return
 	}
-	defer file.Close()
 
 	// Dimensions posted with the upload: a fallback for formats the probe
-	// cannot read, and pass-through thumbnail values.
-	dims := readFormDims(r)
-
-	// Store the file
-	info, err := h.storage.StoreFile(file, header.Filename, clientCode)
-	if err != nil {
-		http.Error(w, "Failed to store file: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
+	// cannot read, and pass-through thumbnail values. A body field wins over
+	// the same name in the URL query, as FormValue had it; the query is kept
+	// as the fallback it always was.
+	query := r.URL.Query()
+	dims := dimsFromValues(func(field string) string {
+		if v := fields.Get(field); v != "" {
+			return v
+		}
+		return query.Get(field)
+	})
 
 	// Probe dims server-side from the persisted bytes; the form values only
 	// stand in when the format is not recognised.
@@ -139,6 +137,159 @@ func (h *UploadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeStoredResponse(w, h.jwtSecret, info, dims, "[upload]")
+}
+
+// uploadFieldLimit bounds a form field the handler reads. The fields are
+// four small integers; a longer value is not one of them.
+const uploadFieldLimit = 1 << 10
+
+// uploadFields are the form fields the handler reads. Only these are kept,
+// first value each; every other part is drained and forgotten, so a body full
+// of small parts costs reading it and nothing more. ParseMultipartForm kept
+// every field and bounded them in aggregate; this keeps four.
+var uploadFields = map[string]bool{"orig_width": true, "orig_height": true, "thumb_width": true, "thumb_height": true}
+
+// storeMultipart reads the multipart body part by part, streams the file
+// part onto the storage volume as it arrives, and publishes it once the whole
+// body has been read and found good. It returns the stored file and the form
+// fields it reads.
+//
+// ParseMultipartForm would first write a file part over its memory budget to
+// a temp file under os.TempDir and hand that file to StoreFile: every upload
+// above the budget crossed the disk twice and needed as much temp space as it
+// was large, on a path that is not the data volume. The bytes now go once,
+// straight to the volume the file ends up on, and nothing about the upload
+// limit has to be mirrored in the size of a temp directory.
+//
+// The file is staged, not stored, while the parts after it are read. Until
+// Commit nothing exists under the final path: a request refused after its
+// file part - an overlong field, a body cut off before its closing boundary -
+// publishes nothing, so there is no window in which the file is served before
+// the moderation that an accepted upload gets, and no published file to take
+// back from a concurrent upload that may already have deduplicated onto it.
+//
+// The first part named "file" that carries a filename is the upload, as
+// FormFile chose it; a second one is drained and ignored. The other fields may
+// precede or follow the file part, as the client orders them, so they are
+// collected until the body ends and read only then.
+func (h *UploadHandler) storeMultipart(r *http.Request, clientCode string) (*storage.FileInfo, url.Values, *httpError) {
+	mr, err := r.MultipartReader()
+	if err != nil {
+		return nil, nil, &httpError{http.StatusBadRequest, "Failed to parse multipart form"}
+	}
+	fields := url.Values{}
+	staged, refusal := h.readParts(mr, clientCode, fields)
+	if refusal != nil {
+		if staged != nil {
+			staged.Discard()
+		}
+		return nil, nil, refusal
+	}
+	if staged == nil {
+		return nil, nil, &httpError{http.StatusBadRequest, "No file provided"}
+	}
+	info, err := staged.Commit()
+	if err != nil {
+		return nil, nil, &httpError{http.StatusInternalServerError, "Failed to store file: " + err.Error()}
+	}
+	return info, fields, nil
+}
+
+// readParts walks the parts to the end of the body. It returns the staged
+// file, if a file part was reached, alongside any refusal, so that the caller
+// can discard it.
+func (h *UploadHandler) readParts(mr *multipart.Reader, clientCode string, fields url.Values) (*storage.Staged, *httpError) {
+	var staged *storage.Staged
+	for {
+		part, err := mr.NextPart()
+		// The reader's clean end is the bare io.EOF. A body cut off before
+		// its closing boundary surfaces as a wrapped EOF, which errors.Is
+		// would take for the same thing; it is a malformed body.
+		if err == io.EOF {
+			return staged, nil
+		}
+		if err != nil {
+			return staged, multipartRefusal(err)
+		}
+		var refusal *httpError
+		switch {
+		case part.FormName() != "file" || part.FileName() == "":
+			refusal = readField(part, fields)
+		case staged != nil:
+			if _, err := io.Copy(io.Discard, part); err != nil {
+				refusal = multipartRefusal(err)
+			}
+		default:
+			staged, refusal = h.stageFilePart(part, clientCode)
+		}
+		part.Close()
+		if refusal != nil {
+			return staged, refusal
+		}
+	}
+}
+
+// readField keeps the first value of a field the handler reads and drains
+// any other part.
+func readField(part *multipart.Part, fields url.Values) *httpError {
+	name := part.FormName()
+	if !uploadFields[name] || fields.Has(name) {
+		if _, err := io.Copy(io.Discard, part); err != nil {
+			return multipartRefusal(err)
+		}
+		return nil
+	}
+	value, err := io.ReadAll(io.LimitReader(part, uploadFieldLimit+1))
+	if err != nil {
+		return multipartRefusal(err)
+	}
+	if len(value) > uploadFieldLimit {
+		return &httpError{http.StatusBadRequest, "Form field too long"}
+	}
+	fields.Set(name, string(value))
+	return nil
+}
+
+// stageFilePart streams the part onto the storage volume. A failure to read
+// the part is the client's body ending early or the body limit, and is
+// answered as such; only a failure with the part read cleanly is the
+// storage's.
+func (h *UploadHandler) stageFilePart(part *multipart.Part, clientCode string) (*storage.Staged, *httpError) {
+	src := &readTracker{Reader: part}
+	staged, err := h.storage.Stage(src, part.FileName(), clientCode)
+	if err != nil {
+		if src.err != nil {
+			return nil, multipartRefusal(src.err)
+		}
+		return nil, &httpError{http.StatusInternalServerError, "Failed to store file: " + err.Error()}
+	}
+	return staged, nil
+}
+
+// readTracker remembers the first error, other than a clean end, that the
+// wrapped reader returned, so that it can be told apart from an error of
+// whatever consumed the reader.
+type readTracker struct {
+	io.Reader
+	err error
+}
+
+func (t *readTracker) Read(p []byte) (int, error) {
+	n, err := t.Reader.Read(p)
+	if err != nil && err != io.EOF && t.err == nil {
+		t.err = err
+	}
+	return n, err
+}
+
+// multipartRefusal maps an error from reading the multipart body: the body
+// limit is a 413, anything else a malformed body.
+func multipartRefusal(err error) *httpError {
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		return &httpError{http.StatusRequestEntityTooLarge, "File too large"}
+	}
+	return &httpError{http.StatusBadRequest, "Failed to parse multipart form"}
 }
 
 // extractClientCode extracts the client code from a URL path.

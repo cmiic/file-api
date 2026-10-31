@@ -160,3 +160,56 @@ func TestStorageRootContainsEscapes(t *testing.T) {
 		t.Errorf("Open followed a symlink out of the root and read %q", string(buf[:n]))
 	}
 }
+
+// Stage writes the file next to its final place without publishing it;
+// Discard removes it and Commit publishes it, each exactly once.
+func TestStageCommitsOrDiscards(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStorage(dir, 60)
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	defer s.Close()
+	list := func() []string {
+		var files []string
+		filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+			if err == nil && !d.IsDir() {
+				rel, _ := filepath.Rel(dir, path)
+				files = append(files, rel)
+			}
+			return nil
+		})
+		return files
+	}
+
+	staged, err := s.Stage(strings.NewReader("payload"), "a.bin", "")
+	if err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	if files := list(); len(files) != 1 || strings.Contains(files[0], staged.sha1Hex) {
+		t.Fatalf("after Stage the volume holds %v, want one temp file not named by the hash", files)
+	}
+	staged.Discard()
+	if files := list(); len(files) != 0 {
+		t.Fatalf("after Discard the volume holds %v", files)
+	}
+	if _, err := staged.Commit(); err == nil {
+		t.Error("Commit after Discard succeeded")
+	}
+
+	staged, err = s.Stage(strings.NewReader("payload"), "a.bin", "")
+	if err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	info, err := staged.Commit()
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if files := list(); len(files) != 1 || files[0] != info.RelativePath || info.Size != 7 || info.IsDuplicate {
+		t.Errorf("after Commit the volume holds %v, info %+v", files, info)
+	}
+	staged.Discard() // a no-op after Commit
+	if files := list(); len(files) != 1 {
+		t.Errorf("Discard after Commit removed the file: %v", files)
+	}
+}
