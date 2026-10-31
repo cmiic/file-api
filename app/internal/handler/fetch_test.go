@@ -123,6 +123,14 @@ func TestFetchBoundsItsRequestBody(t *testing.T) {
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("oversized multipart: got %d, want 413", rec.Code)
 	}
+	// A content type the form parsers do not read: the body must still count.
+	req = withClaims(httptest.NewRequest(http.MethodPost, target, bytes.NewReader(bytes.Repeat([]byte("x"), fetchFormLimit+1))), claims)
+	req.Header.Set("Content-Type", "application/octet-stream")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("oversized octet-stream: got %d, want 413", rec.Code)
+	}
 	if downloads.Load() != 0 {
 		t.Error("a download started before the oversized request body was refused")
 	}

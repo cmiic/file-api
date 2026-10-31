@@ -328,7 +328,13 @@ func TestScanSkipsFollowUpForAFileDeletedAsMalware(t *testing.T) {
 	var f *scanFixture
 	name := "Eicar-Test-Signature"
 	malware := &fakeScanner{handler: func(w http.ResponseWriter, r *http.Request) {
-		f.scan() // the deduplicated upload's scan request, while the scanner is busy
+		// The identical upload, while the scanner is busy: deduplicated
+		// against the file being scanned, and its scan request left pending.
+		info, err := f.store.StoreFile(strings.NewReader("uploaded bytes"), "upload.jpg", "")
+		if err != nil || !info.IsDuplicate || info.RelativePath != f.path {
+			t.Errorf("re-upload should deduplicate against the scanned file: %+v, %v", info, err)
+		}
+		f.scan()
 		answer(scanner.MalwareScanResult{Infected: true, MalwareName: &name})(w, r)
 	}}
 	f = newScanFixture(t, malware, nil)
@@ -368,6 +374,35 @@ func TestScanInfectedStillRecordsAndAlertsWhenDeleteFails(t *testing.T) {
 	}
 	if len(f.alerts.malware) != 1 {
 		t.Errorf("malware alerts %v, want one", f.alerts.malware)
+	}
+}
+
+// TestScanFollowUpVerdictClearsTheRetry: the first pass fails at the scanner
+// and queues a retry; the follow-up pass left by a store during that pass
+// succeeds. The retry must go with it, or the file is scanned once more for
+// nothing and the retry's own outcome written over the verdict.
+func TestScanFollowUpVerdictClearsTheRetry(t *testing.T) {
+	var f *scanFixture
+	malware := &fakeScanner{}
+	malware.handler = func(w http.ResponseWriter, r *http.Request) {
+		if malware.calls.Load() == 1 {
+			f.scan() // a store during the first pass
+			failWith(http.StatusServiceUnavailable)(w, r)
+			return
+		}
+		answer(cleanMalware)(w, r)
+	}
+	f = newScanFixture(t, malware, nil)
+	f.scan()
+
+	if malware.calls.Load() != 2 {
+		t.Fatalf("scanner calls %d, want 2", malware.calls.Load())
+	}
+	if m := f.meta(t); m.Status != StatusClean {
+		t.Errorf("record %q, want clean from the follow-up", m.Status)
+	}
+	if f.queued() {
+		t.Error("the retry queued by the failed first pass outlived the follow-up's verdict")
 	}
 }
 

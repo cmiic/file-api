@@ -3,6 +3,7 @@ package handler
 import (
 	"errors"
 	"fmt"
+	"io"
 	"mime"
 	"net"
 	"net/http"
@@ -194,6 +195,11 @@ func fetchClientCode(path string, claims *middleware.Claims) (string, *httpError
 // ParseForm runs on its own first: ParseMultipartForm calls it too, but on a
 // body that is not multipart it returns ErrNotMultipart in place of whatever
 // ParseForm reported, and an oversized form-encoded body would pass as empty.
+//
+// Whatever the parsers left unread is then drained through the bounded body,
+// so the limit holds for a body of any content type. The parsers read only
+// the types they know; a body they skip would otherwise go unmeasured, and
+// the 413 the limit promises would depend on the Content-Type header.
 func parseFetchForm(r *http.Request) *httpError {
 	err := r.ParseForm()
 	if err == nil {
@@ -201,6 +207,9 @@ func parseFetchForm(r *http.Request) *httpError {
 		if errors.Is(err, http.ErrNotMultipart) {
 			err = nil
 		}
+	}
+	if err == nil {
+		_, err = io.Copy(io.Discard, r.Body)
 	}
 	if err == nil {
 		return nil

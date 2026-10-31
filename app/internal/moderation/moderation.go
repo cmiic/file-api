@@ -268,6 +268,15 @@ func (s *Service) runScan(job scanJob) {
 
 	log.Printf("Starting scan for: %q", job.path)
 	meta := &Metadata{Status: StatusPending, RequestedAt: time.Now()}
+	// A verdict ends any retry still queued for the path. One can be there
+	// from an earlier pass that failed: a follow-up pass (see scan) that
+	// succeeds would otherwise leave it, and the retry would scan the file
+	// again for nothing, or write its own error over the verdict.
+	defer func() {
+		if meta.Status != StatusPending && meta.Status != StatusError {
+			s.clearRetry(job.path)
+		}
+	}()
 
 	if done, err := s.checkMalware(job, meta); done || err != nil {
 		if err != nil {
@@ -658,6 +667,14 @@ func (s *Service) queueForRetry(relativePath, clientCode, sha1 string, isPublic 
 	os.WriteFile(queueFile, data, 0644)
 
 	log.Printf("Queued for retry: %q (attempt %d)", relativePath, entry.Retries+1)
+}
+
+// clearRetry removes the retry queue entry for relativePath, if there is one.
+func (s *Service) clearRetry(relativePath string) {
+	queueFile := filepath.Join(s.queuePath, filepath.Base(relativePath)+".json")
+	if err := os.Remove(queueFile); err != nil && !os.IsNotExist(err) {
+		log.Printf("Could not clear retry entry for %q: %v", relativePath, err)
+	}
 }
 
 // processQueue runs in the background and retries failed scans.
