@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha1"
 	"encoding/hex"
@@ -131,13 +132,24 @@ func (s *Storage) StoreFile(r io.Reader, originalFilename, clientCode string) (*
 	finalName := fmt.Sprintf("%s-%s.%s", baseName, sha1Hex, ext)
 	finalPath := filepath.Join(storageDir, finalName)
 
-	// Check for deduplication
-	if _, err := s.root.Stat(finalPath); err == nil {
-		// File already exists - deduplicate
+	// Check for deduplication. The name encodes the hash, so a file already
+	// there has the same SHA1 - which is not the same as the same bytes: SHA1
+	// collisions are constructible. The bytes are compared before the upload
+	// is dropped in favour of what is stored, and the size reported is the
+	// stored file's, so the response (and the meta_token signing it) always
+	// describes the file that the path actually serves.
+	if existing, err := s.root.Stat(finalPath); err == nil {
+		same, err := s.sameContent(tempPath, finalPath)
 		s.root.Remove(tempPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to compare with stored file: %w", err)
+		}
+		if !same {
+			return nil, fmt.Errorf("a different file is already stored under this name and hash")
+		}
 		return &FileInfo{
 			RelativePath: finalPath,
-			Size:         size,
+			Size:         existing.Size(),
 			IsDuplicate:  true,
 			SHA1:         sha1Hex,
 		}, nil
@@ -155,6 +167,55 @@ func (s *Storage) StoreFile(r io.Reader, originalFilename, clientCode string) (*
 		IsDuplicate:  false,
 		SHA1:         sha1Hex,
 	}, nil
+}
+
+// sameContent reports whether the two stored files hold identical bytes. A
+// size difference settles it without reading; otherwise both are streamed and
+// compared chunk by chunk, so a dedup hit costs one read of the stored file.
+func (s *Storage) sameContent(pathA, pathB string) (bool, error) {
+	a, err := s.root.Open(pathA)
+	if err != nil {
+		return false, err
+	}
+	defer a.Close()
+	b, err := s.root.Open(pathB)
+	if err != nil {
+		return false, err
+	}
+	defer b.Close()
+
+	infoA, err := a.Stat()
+	if err != nil {
+		return false, err
+	}
+	infoB, err := b.Stat()
+	if err != nil {
+		return false, err
+	}
+	if infoA.Size() != infoB.Size() {
+		return false, nil
+	}
+
+	bufA, bufB := make([]byte, 32*1024), make([]byte, 32*1024)
+	for {
+		nA, errA := io.ReadFull(a, bufA)
+		nB, errB := io.ReadFull(b, bufB)
+		if nA != nB || !bytes.Equal(bufA[:nA], bufB[:nB]) {
+			return false, nil
+		}
+		if errA == io.EOF || errA == io.ErrUnexpectedEOF {
+			if errB == io.EOF || errB == io.ErrUnexpectedEOF {
+				return true, nil
+			}
+			return false, nil
+		}
+		if errA != nil {
+			return false, errA
+		}
+		if errB != nil {
+			return false, errB
+		}
+	}
 }
 
 // Open opens a stored file for reading. The name is resolved inside the
