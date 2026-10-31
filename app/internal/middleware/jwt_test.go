@@ -53,6 +53,35 @@ func TestJWTAuth_ValidToken(t *testing.T) {
 	}
 }
 
+// TestJWTAuth_TokenWithoutExpiryIsRejected pins that exp is required. Without
+// the requirement a correctly signed token that omits the claim would be
+// accepted for as long as the secret lives.
+func TestJWTAuth_TokenWithoutExpiryIsRejected(t *testing.T) {
+	auth := NewJWTAuth(testSecret)
+
+	claims := &Claims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			IssuedAt: jwt.NewNumericDate(time.Now()),
+		},
+		Scopes: []string{"upload"},
+	}
+	token := createTestToken(claims, testSecret)
+
+	req := httptest.NewRequest("POST", "/file-upload", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+
+	handler := auth.Middleware(true)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("a token without exp reached the handler")
+	}))
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("Expected status 401 for a token without exp, got %d", rr.Code)
+	}
+}
+
 func TestJWTAuth_ExpiredToken(t *testing.T) {
 	auth := NewJWTAuth(testSecret)
 

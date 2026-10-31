@@ -19,7 +19,7 @@ The security of a deployment depends on assumptions this repository cannot enfor
 - **File API is designed to sit behind a reverse proxy** that terminates TLS and applies caching, rate limiting, and request-body limits. Its own limits are defense in depth, not a replacement.
 - **Moderation is optional and unauthenticated.** It is off unless `MALWARE_SCANNER_URL` or `MEDIA_SCREENER_URL` is set. When set, File API sends upload content to those endpoints over the internal network with no authentication and no TLS, so their reachability is part of File API's trust boundary: whatever can reach them can submit content to them, and whatever can impersonate them can influence a moderation verdict. Those services have their own security policies.
 - **`JWT_SECRET` is required and fails closed.** The service refuses to start when it is missing or shorter than 32 characters. It is an HMAC secret shared with every application that issues tokens; treat it as a credential.
-- **Uploads require a token with the `upload` scope**, and private file access checks the token's client code against the requested path.
+- **Uploads require a token with the `upload` scope**, and private file access checks the token's client code against the requested path. Every token must carry an `exp` claim; one without an expiry is rejected.
 
 ## In scope
 

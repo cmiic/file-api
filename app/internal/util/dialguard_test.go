@@ -44,6 +44,13 @@ func TestBlockedIP(t *testing.T) {
 		"2001:2::1",         // IETF benchmarking
 		"3fff::1",           // documentation, RFC 9637
 		"5f00::1",           // SRv6 segment identifiers
+		"::7f00:1",          // IPv4-compatible (deprecated) for 127.0.0.1; To4 does not unwrap it
+		"::a00:1",           // IPv4-compatible for 10.0.0.1
+
+		// Deprecated ranges that IsGlobalUnicast reports as global unicast.
+		"fec0::1",     // site-local, RFC 3879
+		"feff::1",     // site-local, upper end of fec0::/10
+		"fec0::1:2:3", // site-local with a subnet
 	}
 	for _, s := range blocked {
 		ip := net.ParseIP(s)

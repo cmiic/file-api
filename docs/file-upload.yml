@@ -38,7 +38,8 @@ components:
       bearerFormat: JWT
       description: >-
         JWT token with claims `cli_code` (for private files) and `scopes`. Scopes in use are `upload` for uploads and
-        URL fetches, `delete` for the opt-in delete endpoint, and `scan:read` for scan metadata.
+        URL fetches, `delete` for the opt-in delete endpoint, and `scan:read` for scan metadata. The token must carry
+        an `exp` claim; a token without an expiry is rejected as unauthorized.
     cookieAuth:
       type: apiKey
       in: cookie
@@ -57,6 +58,8 @@ components:
       description: Deletion is not enabled on this deployment (`DELETE_MAX_AGE` unset)
     Deleted:
       description: File removed. Reverse-proxy and imgproxy caches are not purged and may keep serving it until their validity runs out.
+    FetchFormTooLarge:
+      description: The request body, which carries only the optional dimension fields, exceeds 64 KiB
     FileTooLarge:
       description: File exceeds maximum upload size (200MB)
   parameters:
@@ -397,6 +400,8 @@ paths:
           $ref: "#/components/responses/UnauthorizedError"
         "403":
           $ref: "#/components/responses/ForbiddenError"
+        "413":
+          $ref: "#/components/responses/FetchFormTooLarge"
 
   /file-resize/cli/{CLI_CODE}/url/{url}:
     parameters:
@@ -444,6 +449,8 @@ paths:
           $ref: "#/components/responses/UnauthorizedError"
         "403":
           $ref: "#/components/responses/ForbiddenError"
+        "413":
+          $ref: "#/components/responses/FetchFormTooLarge"
 
 tags:
   - name: System

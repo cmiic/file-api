@@ -223,7 +223,7 @@ func handlePDFResize(w http.ResponseWriter, r *http.Request, cfg Config) {
 	}
 
 	// Fetch PDF from file-api
-	pdfData, err := fetchPDF(cfg, filePath, r)
+	pdfData, cacheControl, err := fetchPDF(cfg, filePath, r)
 	if err != nil {
 		log.Printf("fetch %q failed: %v", filePath, err)
 		servePlaceholder(w, "fetch-failed")
@@ -238,6 +238,18 @@ func handlePDFResize(w http.ResponseWriter, r *http.Request, cfg Config) {
 		return
 	}
 
+	// The rendering is as private as its source. file-api answers a private
+	// file (cli/{code}/...) with "private, no-store" and a public one with a
+	// year-long public header; a page rendered from a private PDF carries the
+	// same classification, so no cache between here and the browser can hand
+	// it to the next caller of the same URL. Dropping the header would make
+	// the rendering cacheable by default - the opposite of what the source
+	// said. A proxy that caches private renderings per credential on purpose
+	// has to ignore this header explicitly, as a decision rather than an
+	// accident.
+	if cacheControl != "" {
+		w.Header().Set("Cache-Control", cacheControl)
+	}
 	w.Header().Set("Content-Type", "image/jpeg")
 	w.Header().Set("Content-Length", strconv.Itoa(len(jpegData)))
 	w.WriteHeader(http.StatusOK)
@@ -247,12 +259,15 @@ func handlePDFResize(w http.ResponseWriter, r *http.Request, cfg Config) {
 	}
 }
 
-func fetchPDF(cfg Config, filePath string, origReq *http.Request) ([]byte, error) {
+// fetchPDF reads the source file from file-api, forwarding the caller's
+// credentials. It returns the bytes and the source's Cache-Control header,
+// which says whether the file is private; the rendering inherits it.
+func fetchPDF(cfg Config, filePath string, origReq *http.Request) ([]byte, string, error) {
 	url := cfg.FileAPIBaseURL + filePath
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	// Forward configured headers from the original request
@@ -268,15 +283,19 @@ func fetchPDF(cfg Config, filePath string, origReq *http.Request) ([]byte, error
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("file-api returned status %d", resp.StatusCode)
+		return nil, "", fmt.Errorf("file-api returned status %d", resp.StatusCode)
 	}
 
-	return io.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", err
+	}
+	return data, resp.Header.Get("Cache-Control"), nil
 }
 
 func convertPDFToJPEG(pdfData []byte, params *ResizeParams) ([]byte, error) {

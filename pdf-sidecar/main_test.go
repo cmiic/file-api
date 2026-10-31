@@ -38,7 +38,17 @@ func minimalPDF() []byte {
 // fileAPI is a stand-in for file-api that serves body with status for every path.
 func fileAPI(t *testing.T, status int, body []byte) Config {
 	t.Helper()
+	return fileAPIWithCacheControl(t, status, body, "")
+}
+
+// fileAPIWithCacheControl is fileAPI answering with the given Cache-Control
+// header, as file-api does: private files get "private, no-store".
+func fileAPIWithCacheControl(t *testing.T, status int, body []byte, cacheControl string) Config {
+	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if cacheControl != "" {
+			w.Header().Set("Cache-Control", cacheControl)
+		}
 		w.WriteHeader(status)
 		w.Write(body)
 	}))
@@ -124,6 +134,30 @@ func TestRendersAPDF(t *testing.T) {
 	}
 	if body := rec.Body.Bytes(); bytes.Equal(body, placeholderJPG) || !bytes.HasPrefix(body, []byte{0xFF, 0xD8, 0xFF}) {
 		t.Errorf("want a rendered JPEG, got %d bytes (placeholder: %v)", len(body), bytes.Equal(body, placeholderJPG))
+	}
+}
+
+// TestRenderingInheritsSourceCacheControl pins that a rendered page carries
+// the source file's cache classification. The sidecar forwards the caller's
+// credentials and so can render a private PDF; answering that with no
+// Cache-Control at all would leave a shared cache free to keep it for the
+// next caller of the URL.
+func TestRenderingInheritsSourceCacheControl(t *testing.T) {
+	if _, err := os.Stat(pdftocairoPath); err != nil {
+		t.Skipf("%s not installed: %v", pdftocairoPath, err)
+	}
+	cases := map[string]struct{ path, cacheControl string }{
+		"private": {"/files-rs/rs:fit:240/plain/cli/ACME/2026/1/doc.pdf", "private, no-store"},
+		"public":  {"/files-rs/rs:fit:240/plain/2026/1/doc.pdf", "public, max-age=31536000, immutable"},
+	}
+	for name, tc := range cases {
+		rec := render(t, fileAPIWithCacheControl(t, http.StatusOK, minimalPDF(), tc.cacheControl), tc.path)
+		if rec.Code != http.StatusOK || rec.Header().Get(headerPDFError) != "" {
+			t.Fatalf("%s: render failed: %d, %s=%q", name, rec.Code, headerPDFError, rec.Header().Get(headerPDFError))
+		}
+		if got := rec.Header().Get("Cache-Control"); got != tc.cacheControl {
+			t.Errorf("%s: Cache-Control = %q, want the source's %q", name, got, tc.cacheControl)
+		}
 	}
 }
 

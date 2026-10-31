@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,6 +69,67 @@ func TestDedupIsPerPathNotPerDigest(t *testing.T) {
 	}
 	if len(matches) != 2 {
 		t.Errorf("expected the hash to match 2 stored files, got %d: %v", len(matches), matches)
+	}
+}
+
+// TestDedupRefusesDifferentBytesUnderTheSameName covers the dedup check on
+// content. The final name encodes the SHA1, so a file already there normally
+// holds the same bytes - but SHA1 collisions are constructible, and a stored
+// file can be damaged. Either way the incoming bytes must not be reported as
+// stored when what the path serves is something else. The existing file is
+// planted directly, in place of a real collision.
+func TestDedupRefusesDifferentBytesUnderTheSameName(t *testing.T) {
+	base := t.TempDir()
+	s, err := NewStorage(base, 60)
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	const content = "the bytes being uploaded"
+	sum := sha1.Sum([]byte(content))
+	dir := filepath.Join(base, GenerateStorageDir(""))
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	planted := filepath.Join(dir, "photo-"+hex.EncodeToString(sum[:])+".jpg")
+	if err := os.WriteFile(planted, []byte("the bytes being uploaded!"), 0644); err != nil {
+		t.Fatalf("plant: %v", err)
+	}
+
+	info, err := s.StoreFile(strings.NewReader(content), "photo.jpg", "")
+	if err == nil {
+		t.Fatalf("expected a refusal, got %+v", info)
+	}
+	if got, _ := os.ReadFile(planted); string(got) != "the bytes being uploaded!" {
+		t.Errorf("the stored file was replaced: %q", got)
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Errorf("temp file left behind: %d entries in %s", len(entries), dir)
+	}
+}
+
+// TestDedupReportsTheStoredSize pins that a deduplicated response describes
+// the stored file rather than the upload: with identical bytes the two agree,
+// and the content check above is what keeps it that way.
+func TestDedupReportsTheStoredSize(t *testing.T) {
+	s, err := NewStorage(t.TempDir(), 60)
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	first, err := s.StoreFile(strings.NewReader("same bytes"), "a.bin", "")
+	if err != nil {
+		t.Fatalf("StoreFile: %v", err)
+	}
+	again, err := s.StoreFile(strings.NewReader("same bytes"), "a.bin", "")
+	if err != nil {
+		t.Fatalf("StoreFile: %v", err)
+	}
+	if !again.IsDuplicate || again.Size != first.Size || again.RelativePath != first.RelativePath {
+		t.Errorf("dedup response %+v does not describe the stored file %+v", again, first)
 	}
 }
 

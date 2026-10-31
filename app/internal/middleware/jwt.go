@@ -79,14 +79,19 @@ func (j *JWTAuth) extractClaims(r *http.Request) (*Claims, error) {
 	}
 	tokenString := strings.TrimPrefix(authHeader, bearerPrefix)
 
-	// Parse and validate token
+	// Parse and validate token. An exp claim is required, not merely checked
+	// when present: a signed token without one would stay valid for as long
+	// as the secret does, and nothing here could revoke it. Every issuer of
+	// these tokens sets a lifetime, so requiring the claim costs them nothing
+	// and turns an issuer that forgets it into a 401 rather than a permanent
+	// credential.
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
 		// Validate signing method
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, errors.New("unexpected signing method")
 		}
 		return j.secret, nil
-	})
+	}, jwt.WithExpirationRequired())
 
 	if err != nil {
 		return nil, err
