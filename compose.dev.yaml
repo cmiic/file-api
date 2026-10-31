@@ -93,7 +93,7 @@ services:
         condition: service_healthy
 
   imgproxy:
-    image: ghcr.io/imgproxy/imgproxy:v4.0.18@sha256:03aec6708216c3e017d7ad3fb08eba11d6b83be65556262f8d6cd72803fefeb6
+    image: ghcr.io/imgproxy/imgproxy:v4.0.20@sha256:f5db62d528ab08e7b12f14e759fd7d62c09aeabf2e629d0e2a3963da692d0130
     read_only: true
     security_opt:
       - no-new-privileges:true
@@ -119,7 +119,7 @@ services:
         condition: service_healthy
 
   clamav:
-    image: docker.io/clamav/clamav:1.5.4-debian13-slim@sha256:d7ede3cefeaf3b8a72ebcdee849d13f504bbca3f3b3cfade5bc7b6ee06a4f62c
+    image: docker.io/clamav/clamav:1.5.4-debian13-slim@sha256:cce3e1a43ae2bb40e11335c52c0e1e98273b12fa3d587e617f63a6907cc4b70b
     environment:
       CLAMAV_STREAM_MAX_LENGTH: 220M
       CLAMAV_MAX_SCAN_SIZE: 200M
