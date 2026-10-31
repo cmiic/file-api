@@ -34,6 +34,18 @@ jobs:
             exit 1
           fi
 
+          # The tagged commit has to be on main. A tag on an unmerged branch
+          # would otherwise build and publish, under the repository's name,
+          # code that never went through a pull request. This stops a tag
+          # pushed by mistake; it cannot stop one pushed on purpose, because
+          # whoever can push tags also controls this file at the tagged
+          # commit. Protecting the tags themselves is a repository ruleset.
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "Release tag $tag points at $(git rev-parse HEAD), which is not on main" >&2
+            exit 1
+          fi
+
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR

@@ -28,6 +28,15 @@ jobs:
     # Dependabot secrets store, which is empty here. The token would resolve to
     # "" and the scan fail on authentication, a red check on every Dependabot
     # pull request. Skipping beats failing.
+    #
+    # For the pull requests that do run, the pull request's own code executes
+    # in go test before the scan step receives the token, on the same runner.
+    # That order is accepted rather than split into a second workflow: a
+    # same-repository pull request can only be opened by someone with write
+    # access, Dependabot is excluded below, and Copilot's pull requests wait
+    # for a manual workflow approval. Keep the secret a project analysis
+    # token, so that what the step can do with it is an analysis of this
+    # project and nothing more.
     if: >-
       github.event_name != 'pull_request' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
