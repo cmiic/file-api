@@ -261,7 +261,7 @@ func TestScanRecoversMissingHashForAlerts(t *testing.T) {
 	}
 }
 
-func TestScanSkipsAFileAlreadyBeingScanned(t *testing.T) {
+func TestScanLeavesAFileAlreadyBeingScannedToThatScan(t *testing.T) {
 	malware := &fakeScanner{handler: answer(cleanMalware)}
 	f := newScanFixture(t, malware, nil)
 	f.svc.processing[f.path] = true
@@ -269,6 +269,82 @@ func TestScanSkipsAFileAlreadyBeingScanned(t *testing.T) {
 
 	if malware.calls.Load() != 0 {
 		t.Error("a second scan of the same path ran concurrently")
+	}
+	next, ok := f.svc.releaseOrNext(f.path)
+	if !ok || next.path != f.path || next.sha1 != f.sha1 || !next.isPublic {
+		t.Errorf("the running scan must find the job left for it, got %+v, %v", next, ok)
+	}
+	if _, ok := f.svc.releaseOrNext(f.path); ok || f.svc.processing[f.path] {
+		t.Error("after the last job the claim must be released")
+	}
+}
+
+// TestScanRescansAFileStoredAgainMidScan is the race that left malware
+// served: the first scan deletes the file as infected, an identical upload
+// recreates the path before the scan releases its claim, and that upload's
+// scan request finds the path claimed. The recreated file must be scanned -
+// and deleted - too.
+func TestScanRescansAFileStoredAgainMidScan(t *testing.T) {
+	name := "Eicar-Test-Signature"
+	malware := &fakeScanner{handler: answer(scanner.MalwareScanResult{Infected: true, MalwareName: &name})}
+	f := newScanFixture(t, malware, nil)
+	restored := false
+	f.svc.deleteFile = func(p string) error {
+		if err := f.store.DeleteFile(p); err != nil {
+			return err
+		}
+		if !restored {
+			restored = true
+			// The concurrent upload: identical bytes under the same name
+			// land on the same path, and its scan finds the path claimed.
+			if _, err := f.store.StoreFile(strings.NewReader("uploaded bytes"), "upload.jpg", ""); err != nil {
+				t.Fatalf("re-store: %v", err)
+			}
+			f.scan()
+		}
+		return nil
+	}
+	f.scan()
+
+	if malware.calls.Load() != 2 {
+		t.Errorf("scanner calls %d, want 2: the re-stored file must be scanned again", malware.calls.Load())
+	}
+	if f.store.FileExists(f.path) {
+		t.Error("the re-stored malware is still stored")
+	}
+	if m := f.meta(t); m.Status != StatusMalware {
+		t.Errorf("record %q, want malware", m.Status)
+	}
+	if f.svc.processing[f.path] || len(f.svc.pending) != 0 {
+		t.Error("claim or pending job left behind")
+	}
+}
+
+// TestScanSkipsFollowUpForAFileDeletedAsMalware is the other order: the
+// identical upload is deduplicated against the file while it is being
+// scanned, and the scan then deletes it as malware. The follow-up has nothing
+// to scan and must not replace the malware record with an open error.
+func TestScanSkipsFollowUpForAFileDeletedAsMalware(t *testing.T) {
+	var f *scanFixture
+	name := "Eicar-Test-Signature"
+	malware := &fakeScanner{handler: func(w http.ResponseWriter, r *http.Request) {
+		f.scan() // the deduplicated upload's scan request, while the scanner is busy
+		answer(scanner.MalwareScanResult{Infected: true, MalwareName: &name})(w, r)
+	}}
+	f = newScanFixture(t, malware, nil)
+	f.scan()
+
+	if malware.calls.Load() != 1 {
+		t.Errorf("scanner calls %d, want 1: there is no file left to scan", malware.calls.Load())
+	}
+	if m := f.meta(t); m.Status != StatusMalware {
+		t.Errorf("record %q, want the malware verdict kept", m.Status)
+	}
+	if f.queued() {
+		t.Error("a retry was queued for a file that is gone")
+	}
+	if f.svc.processing[f.path] || len(f.svc.pending) != 0 {
+		t.Error("claim or pending job left behind")
 	}
 }
 

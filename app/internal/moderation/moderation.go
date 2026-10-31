@@ -135,6 +135,10 @@ type Service struct {
 	// Background processing
 	mu         sync.Mutex
 	processing map[string]bool // tracks files currently being processed
+	// pending holds, for a path being scanned, the job of a store that
+	// happened meanwhile; the running scan picks it up when it finishes.
+	// See claim.
+	pending map[string]scanJob
 
 	// metaMu serializes every read-then-write of a metadata record: scan
 	// results, the deleted tombstone, and its removal on re-upload. Without
@@ -227,20 +231,42 @@ type scanJob struct {
 }
 
 // scan runs the configured scanners over one stored file and records the
-// verdict (called async). Malware goes first: it is the faster check and the
-// one that removes the file. The media screener runs only on a file the
-// malware scan cleared. A scanner error records the failure and queues a
-// retry; a file already being scanned is left to that scan.
+// verdict (called async). A file already being scanned is left to that scan,
+// which runs this job again afterwards, so the verdict on record describes
+// the bytes that are stored when it finishes; see claim.
 func (s *Service) scan(relativePath, clientCode, sha1 string, isPublic bool) {
-	if !s.claim(relativePath) {
+	job := scanJob{path: relativePath, clientCode: clientCode, sha1: sha1, isPublic: isPublic}
+	if !s.claim(job) {
 		return
 	}
-	defer s.release(relativePath)
+	s.runScan(job)
+	for {
+		next, ok := s.releaseOrNext(job.path)
+		if !ok {
+			return
+		}
+		job = next
+		// The store that left this job may have been undone since: the scan
+		// just finished deleted the file as malware (the follow-up job came
+		// from a deduplicated re-upload before that), or a DELETE removed
+		// it. Then there is nothing to scan, and running anyway would record
+		// an open error over the malware or deleted record.
+		if present, known := s.filePresent(job.path); known && !present {
+			log.Printf("Skipping follow-up scan, file no longer present: %q", job.path)
+			continue
+		}
+		s.runScan(job)
+	}
+}
 
-	job := scanJob{path: relativePath, clientCode: clientCode, isPublic: isPublic}
-	job.sha1 = s.ensureSHA1(relativePath, sha1)
+// runScan is one pass of the configured scanners over job's file. Malware goes
+// first: it is the faster check and the one that removes the file. The media
+// screener runs only on a file the malware scan cleared. A scanner error
+// records the failure and queues a retry.
+func (s *Service) runScan(job scanJob) {
+	job.sha1 = s.ensureSHA1(job.path, job.sha1)
 
-	log.Printf("Starting scan for: %q", relativePath)
+	log.Printf("Starting scan for: %q", job.path)
 	meta := &Metadata{Status: StatusPending, RequestedAt: time.Now()}
 
 	if done, err := s.checkMalware(job, meta); done || err != nil {
@@ -258,22 +284,45 @@ func (s *Service) scan(relativePath, clientCode, sha1 string, isPublic bool) {
 	s.recordClean(job, meta)
 }
 
-// claim marks relativePath as being scanned, or reports that another scan of
-// it is already running.
-func (s *Service) claim(relativePath string) bool {
+// claim marks job's path as being scanned. If another scan of the path is
+// already running, the job is left for that scan to run once it finishes, and
+// claim reports false.
+//
+// Left for later rather than dropped, because the second job means the file
+// was stored again while the first scan ran, and the first scan's verdict may
+// not describe what is stored by the time it is written. Identical bytes under
+// the same name land on the same path, so a repeated upload is deduplicated
+// against the file being scanned - harmless - or, if the scan has just
+// deleted that file as malware, recreates it. Dropping the second job then
+// left the recreated malware in place, with a malware record and no scan to
+// come. Only the newest job is kept: every job for a path scans the same
+// file, so one follow-up pass is as good as several.
+func (s *Service) claim(job scanJob) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.processing[relativePath] {
+	if s.processing[job.path] {
+		if s.pending == nil {
+			s.pending = make(map[string]scanJob)
+		}
+		s.pending[job.path] = job
 		return false
 	}
-	s.processing[relativePath] = true
+	s.processing[job.path] = true
 	return true
 }
 
-func (s *Service) release(relativePath string) {
+// releaseOrNext ends the claim on relativePath - unless a job was left for it
+// while the scan ran, in which case the claim is kept and that job returned
+// for the caller to run next.
+func (s *Service) releaseOrNext(relativePath string) (scanJob, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if job, ok := s.pending[relativePath]; ok {
+		delete(s.pending, relativePath)
+		return job, true
+	}
 	delete(s.processing, relativePath)
+	return scanJob{}, false
 }
 
 // ensureSHA1 returns sha1, or recomputes it from the stored file when it is
