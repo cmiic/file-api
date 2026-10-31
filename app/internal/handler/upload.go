@@ -4,6 +4,8 @@ package handler
 import (
 	"errors"
 	"io"
+	"log"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 
@@ -130,13 +132,19 @@ func (h *UploadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	writeStoredResponse(w, h.jwtSecret, info, dims, "[upload]")
 }
 
-// uploadFieldLimit bounds a non-file part of the upload form. The fields the
-// handler reads are four small integers; a longer value is not one of them.
+// uploadFieldLimit bounds a form field the handler reads. The fields are
+// four small integers; a longer value is not one of them.
 const uploadFieldLimit = 1 << 10
 
+// uploadFields are the form fields the handler reads. Only these are kept,
+// first value each; every other part is drained and forgotten, so a body full
+// of small parts costs reading it and nothing more. ParseMultipartForm kept
+// every field and bounded them in aggregate; this keeps four.
+var uploadFields = map[string]bool{"orig_width": true, "orig_height": true, "thumb_width": true, "thumb_height": true}
+
 // storeMultipart reads the multipart body part by part and streams the file
-// part into storage as it arrives, returning the stored file and the other
-// form fields.
+// part into storage as it arrives, returning the stored file and the form
+// fields it reads.
 //
 // ParseMultipartForm would first write a file part over its memory budget to
 // a temp file under os.TempDir and hand that file to StoreFile: every upload
@@ -155,45 +163,111 @@ func (h *UploadHandler) storeMultipart(r *http.Request, clientCode string) (*sto
 		return nil, nil, &httpError{http.StatusBadRequest, "Failed to parse multipart form"}
 	}
 	fields := url.Values{}
-	var info *storage.FileInfo
-	for {
-		part, err := mr.NextPart()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, nil, multipartRefusal(err)
-		}
-		switch {
-		case part.FormName() != "file" || part.FileName() == "":
-			value, err := io.ReadAll(io.LimitReader(part, uploadFieldLimit+1))
-			if err != nil {
-				return nil, nil, multipartRefusal(err)
-			}
-			if len(value) > uploadFieldLimit {
-				return nil, nil, &httpError{http.StatusBadRequest, "Form field too long"}
-			}
-			fields.Add(part.FormName(), string(value))
-		case info != nil:
-			if _, err := io.Copy(io.Discard, part); err != nil {
-				return nil, nil, multipartRefusal(err)
-			}
-		default:
-			info, err = h.storage.StoreFile(part, part.FileName(), clientCode)
-			if err != nil {
-				var maxBytesErr *http.MaxBytesError
-				if errors.As(err, &maxBytesErr) {
-					return nil, nil, &httpError{http.StatusRequestEntityTooLarge, "File too large"}
-				}
-				return nil, nil, &httpError{http.StatusInternalServerError, "Failed to store file: " + err.Error()}
+	info, refusal := h.readParts(mr, clientCode, fields)
+	if refusal != nil {
+		// The file part is stored before the parts after it are read, so a
+		// refusal there finds the file already on the volume. A refused
+		// request must leave nothing behind: the file would sit at its
+		// predictable path and never be moderated, since ProcessUpload runs
+		// for an accepted upload only. A deduplicated hit is an existing
+		// file, not this request's, and stays.
+		if info != nil && !info.IsDuplicate {
+			if err := h.storage.DeleteFile(info.RelativePath); err != nil {
+				log.Printf("[upload] remove %q after a refused request: %v", info.RelativePath, err)
 			}
 		}
-		part.Close()
+		return nil, nil, refusal
 	}
 	if info == nil {
 		return nil, nil, &httpError{http.StatusBadRequest, "No file provided"}
 	}
 	return info, fields, nil
+}
+
+// readParts walks the parts to the end of the body. It returns the stored
+// file, if a file part was reached, alongside any refusal, so that the caller
+// can undo the store.
+func (h *UploadHandler) readParts(mr *multipart.Reader, clientCode string, fields url.Values) (*storage.FileInfo, *httpError) {
+	var info *storage.FileInfo
+	for {
+		part, err := mr.NextPart()
+		// The reader's clean end is the bare io.EOF. A body cut off before
+		// its closing boundary surfaces as a wrapped EOF, which errors.Is
+		// would take for the same thing; it is a malformed body.
+		if err == io.EOF {
+			return info, nil
+		}
+		if err != nil {
+			return info, multipartRefusal(err)
+		}
+		var refusal *httpError
+		switch {
+		case part.FormName() != "file" || part.FileName() == "":
+			refusal = readField(part, fields)
+		case info != nil:
+			if _, err := io.Copy(io.Discard, part); err != nil {
+				refusal = multipartRefusal(err)
+			}
+		default:
+			info, refusal = h.storeFilePart(part, clientCode)
+		}
+		part.Close()
+		if refusal != nil {
+			return info, refusal
+		}
+	}
+}
+
+// readField keeps the first value of a field the handler reads and drains
+// any other part.
+func readField(part *multipart.Part, fields url.Values) *httpError {
+	name := part.FormName()
+	if !uploadFields[name] || fields.Has(name) {
+		if _, err := io.Copy(io.Discard, part); err != nil {
+			return multipartRefusal(err)
+		}
+		return nil
+	}
+	value, err := io.ReadAll(io.LimitReader(part, uploadFieldLimit+1))
+	if err != nil {
+		return multipartRefusal(err)
+	}
+	if len(value) > uploadFieldLimit {
+		return &httpError{http.StatusBadRequest, "Form field too long"}
+	}
+	fields.Set(name, string(value))
+	return nil
+}
+
+// storeFilePart streams the part into storage. A failure to read the part is
+// the client's body ending early or the body limit, and is answered as such;
+// only a failure with the part read cleanly is the storage's.
+func (h *UploadHandler) storeFilePart(part *multipart.Part, clientCode string) (*storage.FileInfo, *httpError) {
+	src := &readTracker{Reader: part}
+	info, err := h.storage.StoreFile(src, part.FileName(), clientCode)
+	if err != nil {
+		if src.err != nil {
+			return nil, multipartRefusal(src.err)
+		}
+		return nil, &httpError{http.StatusInternalServerError, "Failed to store file: " + err.Error()}
+	}
+	return info, nil
+}
+
+// readTracker remembers the first error, other than a clean end, that the
+// wrapped reader returned, so that it can be told apart from an error of
+// whatever consumed the reader.
+type readTracker struct {
+	io.Reader
+	err error
+}
+
+func (t *readTracker) Read(p []byte) (int, error) {
+	n, err := t.Reader.Read(p)
+	if err != nil && err != io.EOF && t.err == nil {
+		t.err = err
+	}
+	return n, err
 }
 
 // multipartRefusal maps an error from reading the multipart body: the body

@@ -239,3 +239,132 @@ func TestUploadRefusesAnOversizedBodyOfUnknownLength(t *testing.T) {
 		t.Errorf("storage holds %v after a refused upload", files)
 	}
 }
+
+// multipartBody writes the parts in the order given: a field is {name, value},
+// a file is {"file", filename, content}.
+func multipartBody(t *testing.T, parts ...[]string) (*bytes.Buffer, string) {
+	t.Helper()
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	for _, p := range parts {
+		if len(p) == 3 {
+			w, err := mw.CreateFormFile(p[0], p[1])
+			if err != nil {
+				t.Fatalf("CreateFormFile: %v", err)
+			}
+			w.Write([]byte(p[2]))
+			continue
+		}
+		if err := mw.WriteField(p[0], p[1]); err != nil {
+			t.Fatalf("WriteField: %v", err)
+		}
+	}
+	mw.Close()
+	return &body, mw.FormDataContentType()
+}
+
+func rawUpload(t *testing.T, body []byte, contentType string) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/file-upload", bytes.NewReader(body))
+	req.Header.Set("Content-Type", contentType)
+	return withClaims(req, &middleware.Claims{Scopes: []string{"upload"}})
+}
+
+// A request refused after its file part was stored leaves nothing behind: the
+// file would otherwise sit at its path unmoderated. A deduplicated hit is an
+// existing file and stays.
+func TestUploadRemovesTheFileOfARefusedRequest(t *testing.T) {
+	dir := t.TempDir()
+	s, err := storage.NewStorage(dir, 60)
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	defer s.Close()
+	h := NewUploadHandler(s, nil, 1<<20, testSecret)
+	tooLong := strings.Repeat("1", uploadFieldLimit+1)
+
+	body, ct := multipartBody(t, []string{"file", "a.bin", "payload"}, []string{"orig_width", tooLong})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, rawUpload(t, body.Bytes(), ct))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("overlong field after the file: got %d: %s", rec.Code, rec.Body.String())
+	}
+	if files := storedFiles(t, dir); len(files) != 0 {
+		t.Errorf("storage holds %v after a refused request", files)
+	}
+
+	// Missing closing boundary after a complete file part.
+	full, ct := multipartBody(t, []string{"file", "a.bin", "payload"})
+	truncated := bytes.TrimSuffix(full.Bytes(), []byte("--\r\n"))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, rawUpload(t, truncated, ct))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("body without closing boundary: got %d: %s", rec.Code, rec.Body.String())
+	}
+	if files := storedFiles(t, dir); len(files) != 0 {
+		t.Errorf("storage holds %v after a truncated request", files)
+	}
+
+	// The same bytes accepted once, then refused: the accepted file stays.
+	body, ct = multipartBody(t, []string{"file", "a.bin", "payload"})
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, rawUpload(t, body.Bytes(), ct))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("plain upload: got %d: %s", rec.Code, rec.Body.String())
+	}
+	kept := decodeStored(t, rec).Orig.Name
+	body, ct = multipartBody(t, []string{"file", "a.bin", "payload"}, []string{"orig_width", tooLong})
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, rawUpload(t, body.Bytes(), ct))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("refused duplicate: got %d: %s", rec.Code, rec.Body.String())
+	}
+	if files := storedFiles(t, dir); len(files) != 1 || files[0] != kept {
+		t.Errorf("storage holds %v, want the earlier upload %q untouched", files, kept)
+	}
+}
+
+// A body that ends inside the file part is the client's doing, not the
+// volume's: 400, not 500, and nothing stored.
+func TestUploadAnswersATruncatedFilePartAsBadRequest(t *testing.T) {
+	dir := t.TempDir()
+	s, err := storage.NewStorage(dir, 60)
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	defer s.Close()
+	h := NewUploadHandler(s, nil, 1<<20, testSecret)
+
+	full, ct := multipartBody(t, []string{"file", "a.bin", strings.Repeat("payload ", 512)})
+	cut := full.Bytes()[:full.Len()-2048]
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, rawUpload(t, cut, ct))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
+	}
+	if files := storedFiles(t, dir); len(files) != 0 {
+		t.Errorf("storage holds %v after a truncated file part", files)
+	}
+}
+
+// Only the four fields the handler reads are kept, first value each; the rest
+// of the body is read and forgotten, however many parts it has.
+func TestUploadKeepsOnlyTheFieldsItReads(t *testing.T) {
+	parts := [][]string{{"orig_width", "640"}, {"orig_width", "1"}, {"file", "a.bin", "payload"}}
+	for range 5000 {
+		parts = append(parts, []string{"noise", strings.Repeat("n", 64)})
+	}
+	body, ct := multipartBody(t, parts...)
+	h := NewUploadHandler(newTestStorage(t), nil, 1<<20, testSecret)
+	req := rawUpload(t, body.Bytes(), ct)
+	info, fields, refusal := h.storeMultipart(req, "")
+	if refusal != nil {
+		t.Fatalf("refused: %d %s", refusal.status, refusal.msg)
+	}
+	if info == nil || info.Size != int64(len("payload")) {
+		t.Fatalf("info %+v, want the 7-byte file", info)
+	}
+	if len(fields) != 1 || len(fields["orig_width"]) != 1 || fields.Get("orig_width") != "640" {
+		t.Errorf("fields %v, want only orig_width=640", fields)
+	}
+}
