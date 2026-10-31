@@ -27,7 +27,15 @@ import (
 //
 // ::ffff:0:0/96 is deliberately absent: net.IP.To4 returns a 4-byte form for
 // IPv4-mapped addresses, so they are matched against the IPv4 list below and
-// ::ffff:8.8.8.8 stays reachable while ::ffff:127.0.0.1 does not.
+// ::ffff:8.8.8.8 stays reachable while ::ffff:127.0.0.1 does not. The older
+// IPv4-compatible form ::a.b.c.d (::/96) gets no such unwrapping from To4, so
+// ::7f00:1 would pass as an ordinary IPv6 address; the prefix is deprecated
+// and nothing public lives in it, so it is blocked whole.
+//
+// fec0::/10 and ::/96 are deprecated rather than listed as special-purpose,
+// which is why IsGlobalUnicast reports them as global unicast: it tracks the
+// current assignments, not the history. A deployment that still routes
+// site-local addresses internally would have them dialled without the entry.
 var blockedCIDRs = mustParseCIDRs([]string{
 	// IPv4
 	"0.0.0.0/8",       // "this network" (RFC 1122)
@@ -49,6 +57,7 @@ var blockedCIDRs = mustParseCIDRs([]string{
 	// IPv6
 	"::/128",         // unspecified
 	"::1/128",        // loopback
+	"::/96",          // IPv4-compatible (deprecated, RFC 4291) - embeds IPv4, see below
 	"64:ff9b::/96",   // NAT64 well-known prefix - embeds IPv4, see above
 	"64:ff9b:1::/48", // NAT64 local-use prefix (RFC 8215) - same
 	"100::/64",       // discard-only
@@ -59,6 +68,7 @@ var blockedCIDRs = mustParseCIDRs([]string{
 	"5f00::/16",      // SRv6 segment identifiers (RFC 9602)
 	"fc00::/7",       // unique local
 	"fe80::/10",      // link-local
+	"fec0::/10",      // site-local (deprecated, RFC 3879) - the IPv6 private space of its day
 	"ff00::/8",       // multicast
 })
 
