@@ -65,8 +65,35 @@ func NewStorage(basePath string, maxFilenameLen int) (*Storage, error) {
 func (s *Storage) Close() error { return s.root.Close() }
 
 // StoreFile stores a file from an io.Reader, computing SHA1 for deduplication.
-// Returns FileInfo with the relative path and metadata.
+// Returns FileInfo with the relative path and metadata. It is Stage followed
+// by Commit, for a caller that has nothing to check between the two.
 func (s *Storage) StoreFile(r io.Reader, originalFilename, clientCode string) (*FileInfo, error) {
+	staged, err := s.Stage(r, originalFilename, clientCode)
+	if err != nil {
+		return nil, err
+	}
+	return staged.Commit()
+}
+
+// Staged is a file written to the storage volume under a temporary name,
+// hashed, and not yet at the path it will be served from. Commit publishes
+// it; Discard removes it. One of the two must be called.
+type Staged struct {
+	s         *Storage
+	tempPath  string
+	finalPath string
+	size      int64
+	sha1Hex   string
+	done      bool
+}
+
+// Stage writes the reader to a temporary file in the directory the final
+// file will live in, computing its SHA1 on the way. Nothing is visible under
+// the final path until Commit: a caller that has more of the request to read
+// after the bytes - and may yet refuse it - can stage first and publish only
+// once the whole request is good, without the file ever having been served
+// or seen by a deduplicating upload in between.
+func (s *Storage) Stage(r io.Reader, originalFilename, clientCode string) (*Staged, error) {
 	// Sanitize the filename
 	sanitized := util.SanitizeFilename(originalFilename, s.MaxFilenameLen)
 	if sanitized == "" || !util.IsValidFilename(sanitized) {
@@ -125,12 +152,32 @@ func (s *Storage) StoreFile(r io.Reader, originalFilename, clientCode string) (*
 		s.root.Remove(tempPath)
 		return nil, fmt.Errorf("failed to write file: %w", err)
 	}
-	tempFile.Close()
+	if err := tempFile.Close(); err != nil {
+		s.root.Remove(tempPath)
+		return nil, fmt.Errorf("failed to write file: %w", err)
+	}
 
 	// Generate final filename with SHA1
 	sha1Hex := hex.EncodeToString(hash.Sum(nil))
 	finalName := fmt.Sprintf("%s-%s.%s", baseName, sha1Hex, ext)
-	finalPath := filepath.Join(storageDir, finalName)
+	return &Staged{
+		s:         s,
+		tempPath:  tempPath,
+		finalPath: filepath.Join(storageDir, finalName),
+		size:      size,
+		sha1Hex:   sha1Hex,
+	}, nil
+}
+
+// Commit publishes the staged file under its final path, or drops it in
+// favour of an identical file already there. The temporary file is gone
+// either way, also on error.
+func (st *Staged) Commit() (*FileInfo, error) {
+	if st.done {
+		return nil, fmt.Errorf("staged file already committed or discarded")
+	}
+	st.done = true
+	s := st.s
 
 	// Check for deduplication. The name encodes the hash, so a file already
 	// there has the same SHA1 - which is not the same as the same bytes: SHA1
@@ -138,9 +185,9 @@ func (s *Storage) StoreFile(r io.Reader, originalFilename, clientCode string) (*
 	// is dropped in favour of what is stored, and the size reported is the
 	// stored file's, so the response (and the meta_token signing it) always
 	// describes the file that the path actually serves.
-	if existing, err := s.root.Stat(finalPath); err == nil {
-		same, err := s.sameContent(tempPath, finalPath)
-		s.root.Remove(tempPath)
+	if existing, err := s.root.Stat(st.finalPath); err == nil {
+		same, err := s.sameContent(st.tempPath, st.finalPath)
+		s.root.Remove(st.tempPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to compare with stored file: %w", err)
 		}
@@ -148,25 +195,34 @@ func (s *Storage) StoreFile(r io.Reader, originalFilename, clientCode string) (*
 			return nil, fmt.Errorf("a different file is already stored under this name and hash")
 		}
 		return &FileInfo{
-			RelativePath: finalPath,
+			RelativePath: st.finalPath,
 			Size:         existing.Size(),
 			IsDuplicate:  true,
-			SHA1:         sha1Hex,
+			SHA1:         st.sha1Hex,
 		}, nil
 	}
 
 	// Rename temp file to final path
-	if err := s.root.Rename(tempPath, finalPath); err != nil {
-		s.root.Remove(tempPath)
+	if err := s.root.Rename(st.tempPath, st.finalPath); err != nil {
+		s.root.Remove(st.tempPath)
 		return nil, fmt.Errorf("failed to rename file: %w", err)
 	}
 
 	return &FileInfo{
-		RelativePath: finalPath,
-		Size:         size,
+		RelativePath: st.finalPath,
+		Size:         st.size,
 		IsDuplicate:  false,
-		SHA1:         sha1Hex,
+		SHA1:         st.sha1Hex,
 	}, nil
+}
+
+// Discard removes a staged file that will not be published.
+func (st *Staged) Discard() {
+	if st.done {
+		return
+	}
+	st.done = true
+	st.s.root.Remove(st.tempPath)
 }
 
 // sameContent reports whether the two stored files hold identical bytes. A

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"file-api/internal/middleware"
 	"file-api/internal/storage"
@@ -270,10 +271,10 @@ func rawUpload(t *testing.T, body []byte, contentType string) *http.Request {
 	return withClaims(req, &middleware.Claims{Scopes: []string{"upload"}})
 }
 
-// A request refused after its file part was stored leaves nothing behind: the
-// file would otherwise sit at its path unmoderated. A deduplicated hit is an
-// existing file and stays.
-func TestUploadRemovesTheFileOfARefusedRequest(t *testing.T) {
+// A request refused after its file part publishes nothing: the file would
+// otherwise sit at its path unmoderated. An earlier upload of the same bytes
+// is untouched by the refusal.
+func TestUploadPublishesNothingForARefusedRequest(t *testing.T) {
 	dir := t.TempDir()
 	s, err := storage.NewStorage(dir, 60)
 	if err != nil {
@@ -366,5 +367,71 @@ func TestUploadKeepsOnlyTheFieldsItReads(t *testing.T) {
 	}
 	if len(fields) != 1 || len(fields["orig_width"]) != 1 || fields.Get("orig_width") != "640" {
 		t.Errorf("fields %v, want only orig_width=640", fields)
+	}
+}
+
+// While the parts after the file are still arriving, the file is not under
+// its final path: nothing serves it, and an upload of the same bytes in the
+// meantime is a store of its own that the first request's refusal cannot
+// take away.
+func TestUploadKeepsTheFileUnpublishedUntilTheBodyIsComplete(t *testing.T) {
+	dir := t.TempDir()
+	s, err := storage.NewStorage(dir, 60)
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	defer s.Close()
+	h := NewUploadHandler(s, nil, 1<<20, testSecret)
+	claims := &middleware.Claims{Scopes: []string{"upload"}}
+
+	// Request A: file part, then a pause before an overlong field.
+	pr, pw := io.Pipe()
+	mw := multipart.NewWriter(pw)
+	reqA := httptest.NewRequest(http.MethodPost, "/file-upload", pr)
+	reqA.Header.Set("Content-Type", mw.FormDataContentType())
+	reqA = withClaims(reqA, claims)
+	recA := httptest.NewRecorder()
+	doneA := make(chan struct{})
+	go func() {
+		defer close(doneA)
+		h.ServeHTTP(recA, reqA)
+	}()
+	fw, _ := mw.CreateFormFile("file", "a.bin")
+	fw.Write([]byte("payload"))
+	// Open the next part so the handler has finished staging the file.
+	fieldW, _ := mw.CreateFormField("orig_width")
+	fieldW.Write([]byte("1"))
+	deadline := time.Now().Add(5 * time.Second)
+	for len(storedFiles(t, dir)) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("request A never staged its file")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	for _, f := range storedFiles(t, dir) {
+		if strings.Contains(f, "-f07e5a815613c5abeddc4b682247a4c42d8a95df.bin") {
+			t.Fatalf("file published at %q before the body was complete", f)
+		}
+	}
+
+	// Request B: the same bytes, complete; accepted on its own.
+	body, ct := multipartBody(t, []string{"file", "a.bin", "payload"})
+	recB := httptest.NewRecorder()
+	h.ServeHTTP(recB, rawUpload(t, body.Bytes(), ct))
+	if recB.Code != http.StatusOK {
+		t.Fatalf("request B: got %d: %s", recB.Code, recB.Body.String())
+	}
+	kept := decodeStored(t, recB).Orig.Name
+
+	// Request A ends with a refusal.
+	fieldW.Write([]byte(strings.Repeat("1", uploadFieldLimit)))
+	mw.Close()
+	pw.Close()
+	<-doneA
+	if recA.Code != http.StatusBadRequest {
+		t.Fatalf("request A: got %d: %s", recA.Code, recA.Body.String())
+	}
+	if files := storedFiles(t, dir); len(files) != 1 || files[0] != kept {
+		t.Errorf("storage holds %v, want only request B's %q", files, kept)
 	}
 }
