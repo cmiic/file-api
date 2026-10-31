@@ -119,11 +119,16 @@ type formDims struct {
 	thumbWidth, thumbHeight int
 }
 
-// readFormDims reads the optional dimension form fields. A missing or
-// malformed value counts as 0, which is what clients have always relied on.
+// readFormDims reads the optional dimension form fields of a parsed form.
 func readFormDims(r *http.Request) formDims {
+	return dimsFromValues(r.FormValue)
+}
+
+// dimsFromValues reads the optional dimension fields through get. A missing
+// or malformed value counts as 0, which is what clients have always relied on.
+func dimsFromValues(get func(string) string) formDims {
 	atoi := func(field string) int {
-		v, _ := strconv.Atoi(r.FormValue(field))
+		v, _ := strconv.Atoi(get(field))
 		return v
 	}
 	return formDims{
