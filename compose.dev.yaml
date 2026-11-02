@@ -166,7 +166,7 @@ services:
       start_period: 30s
 
   media-screener-api:
-    image: ghcr.io/cmiic/media-screener-api:v1.0.2@sha256:876da7e50fd2fede26c03573ea401d31a6b392e6b3a81b3fc2f9b4193fa2e576
+    image: ghcr.io/cmiic/media-screener-api:v1.0.3@sha256:7f128bae0646aabb5612992d10b421a68dce0274858c1488ffd116405170419c
     read_only: true
     tmpfs:
       - /tmp:size=512m
