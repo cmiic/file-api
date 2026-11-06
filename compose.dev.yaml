@@ -138,7 +138,7 @@ services:
       start_period: 300s
 
   malware-scanner-api:
-    image: ghcr.io/cmiic/malware-scanner-api:v1.0.2@sha256:ca7f8e2ca957dc14ce4ab02ef0ac10a9f9e5e36367148f42fd8189791207fef8
+    image: ghcr.io/cmiic/malware-scanner-api:v1.0.3@sha256:ed4bcee40ab2c18759b8fc71ea36f33e77be9310cf1d6d6dc522a80b767a6c24
     read_only: true
     tmpfs:
       - /tmp:size=256m
