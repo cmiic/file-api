@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
+
+	"file-api/internal/auth"
 	"file-api/internal/middleware"
 	"file-api/internal/moderation"
 	"file-api/internal/storage"
@@ -93,6 +96,14 @@ func deleteClaims(clientCode string, scopes ...string) *middleware.Claims {
 	return &middleware.Claims{ClientCode: clientCode, Scopes: scopes}
 }
 
+// boundClaims is deleteClaims plus the delete_path claim naming path, the form
+// a delete token must have.
+func boundClaims(path, clientCode string, scopes ...string) *middleware.Claims {
+	claims := deleteClaims(clientCode, scopes...)
+	claims.DeletePath = path
+	return claims
+}
+
 func (f *deleteFixture) do(target string, claims *middleware.Claims) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodDelete, target, nil)
 	if claims != nil {
@@ -107,7 +118,7 @@ func TestDeleteRemovesFreshPublicFile(t *testing.T) {
 	f := newDeleteFixture(t, false, time.Hour)
 	rel := f.put(t, "oops", "wrong.txt", "")
 
-	rec := f.do("/files/"+rel, deleteClaims("", "upload", "delete"))
+	rec := f.do("/files/"+rel, boundClaims(rel, "", "upload", "delete"))
 
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
@@ -123,9 +134,9 @@ func TestDeleteRequiresDeleteScope(t *testing.T) {
 
 	cases := map[string]*middleware.Claims{
 		"no claims":        nil,
-		"upload only":      deleteClaims("", "upload"),
-		"read and scan":    deleteClaims("", "read", "scan:read"),
-		"empty scope list": deleteClaims(""),
+		"upload only":      boundClaims(rel, "", "upload"),
+		"read and scan":    boundClaims(rel, "", "read", "scan:read"),
+		"empty scope list": boundClaims(rel, ""),
 	}
 	for name, claims := range cases {
 		rec := f.do("/files/"+rel, claims)
@@ -138,12 +149,146 @@ func TestDeleteRequiresDeleteScope(t *testing.T) {
 	}
 }
 
+func TestDeleteRequiresTokenBoundToFile(t *testing.T) {
+	f := newDeleteFixture(t, false, time.Hour)
+	pub := f.put(t, "public", "pub.txt", "")
+	other := f.put(t, "other", "other.txt", "")
+	priv := f.put(t, "private", "priv.pdf", "ACME")
+
+	refused := []struct {
+		name   string
+		path   string
+		claims *middleware.Claims
+	}{
+		{"public, no claim", pub, deleteClaims("", "delete")},
+		{"public, another file", pub, boundClaims(other, "", "delete")},
+		{"public, URL form of the path", pub, boundClaims("/files/"+pub, "", "delete")},
+		{"public, leading slash", pub, boundClaims("/"+pub, "", "delete")},
+		{"public, directory of the file", pub, boundClaims(filepath.Dir(pub), "", "delete")},
+		{"private, no claim", priv, deleteClaims("ACME", "delete")},
+		{"private, another file", priv, boundClaims(pub, "ACME", "delete")},
+	}
+	for _, tc := range refused {
+		rec := f.do("/files/"+tc.path, tc.claims)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s: expected 403, got %d: %s", tc.name, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "not bound") {
+			t.Errorf("%s: expected the body to name the binding, got %q", tc.name, rec.Body.String())
+		}
+		if !f.exists(tc.path) {
+			t.Fatalf("%s: a refused delete removed the file", tc.name)
+		}
+	}
+
+	for _, path := range []struct{ rel, code string }{{pub, ""}, {priv, "ACME"}} {
+		if rec := f.do("/files/"+path.rel, boundClaims(path.rel, path.code, "delete")); rec.Code != http.StatusNoContent {
+			t.Errorf("%s: expected 204, got %d: %s", path.rel, rec.Code, rec.Body.String())
+		}
+		if f.exists(path.rel) {
+			t.Errorf("%s: still present after 204", path.rel)
+		}
+	}
+}
+
+func TestDeleteBindingDoesNotRevealExistence(t *testing.T) {
+	// A token for one file gets the same answer about any other path, whether
+	// or not something is stored there.
+	f := newDeleteFixture(t, false, time.Hour)
+	mine := f.put(t, "mine", "mine.txt", "")
+	theirs := f.put(t, "theirs", "theirs.txt", "")
+
+	present := f.do("/files/"+theirs, boundClaims(mine, "", "delete"))
+	absent := f.do("/files/2026/1/nothing-here.txt", boundClaims(mine, "", "delete"))
+
+	if present.Code != absent.Code || present.Body.String() != absent.Body.String() {
+		t.Errorf("answers differ: %d %q and %d %q", present.Code, present.Body.String(), absent.Code, absent.Body.String())
+	}
+}
+
+func TestDeleteBindingComparesCleanedPath(t *testing.T) {
+	// Repeated slashes are one more spelling of the same file, and the claim
+	// holds the path as an upload returned it.
+	f := newDeleteFixture(t, false, time.Hour)
+	rel := f.put(t, "spelled", "spelled.txt", "")
+	target := "/files/" + filepath.Dir(rel) + "%2F%2F" + filepath.Base(rel)
+
+	rec := f.do(target, boundClaims(rel, "", "delete"))
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestDeleteThroughJWTMiddleware runs real tokens through the middleware that
+// wraps the handler in main.go, including the two tokens that must not work
+// although they are validly signed.
+func TestDeleteThroughJWTMiddleware(t *testing.T) {
+	const secret = "0123456789abcdef0123456789abcdef"
+	base := t.TempDir()
+	store, err := storage.NewStorage(base, 60)
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	info, err := store.StoreFile(strings.NewReader("x"), "x.txt", "")
+	if err != nil {
+		t.Fatalf("StoreFile: %v", err)
+	}
+	rel := info.RelativePath
+
+	mux := http.NewServeMux()
+	jwtAuth := middleware.NewJWTAuth(secret)
+	mux.Handle("DELETE /files/", jwtAuth.Middleware(true)(NewDeleteHandler(store, nil, time.Hour)))
+
+	sign := func(claims jwt.Claims) string {
+		t.Helper()
+		signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(secret))
+		if err != nil {
+			t.Fatalf("sign: %v", err)
+		}
+		return signed
+	}
+	exp := jwt.RegisteredClaims{ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Minute))}
+	send := func(mutate func(*http.Request)) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodDelete, "/files/"+rel, nil)
+		mutate(req)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	metaToken, err := auth.Mint([]byte(secret), rel, 1, 0, 0)
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	if rec := send(func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+metaToken) }); rec.Code != http.StatusForbidden {
+		t.Errorf("meta_token: expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	session := sign(middleware.Claims{RegisteredClaims: exp, Scopes: []string{"upload", "read", "delete"}})
+	if rec := send(func(r *http.Request) { r.AddCookie(&http.Cookie{Name: "jwt_token", Value: session}) }); rec.Code != http.StatusForbidden {
+		t.Errorf("session cookie: expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !store.FileExists(rel) {
+		t.Fatal("a refused token removed the file")
+	}
+
+	bound := sign(middleware.Claims{RegisteredClaims: exp, Scopes: []string{"delete"}, DeletePath: rel})
+	if rec := send(func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+bound) }); rec.Code != http.StatusNoContent {
+		t.Errorf("bound token: expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if store.FileExists(rel) {
+		t.Error("file still present after 204")
+	}
+}
+
 func TestDeleteRefusesFileOlderThanWindow(t *testing.T) {
 	f := newDeleteFixture(t, false, time.Hour)
 	rel := f.put(t, "archived", "old.txt", "")
 	f.age(t, rel, 2*time.Hour)
 
-	rec := f.do("/files/"+rel, deleteClaims("", "delete"))
+	rec := f.do("/files/"+rel, boundClaims(rel, "", "delete"))
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
@@ -168,7 +313,7 @@ func TestDeleteWindowIsMeasuredFromFirstUpload(t *testing.T) {
 		t.Fatalf("expected dedup to return the same path, got %q and %q", rel, again)
 	}
 
-	rec := f.do("/files/"+rel, deleteClaims("", "delete"))
+	rec := f.do("/files/"+rel, boundClaims(rel, "", "delete"))
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 after a dedup hit on an old file, got %d: %s", rec.Code, rec.Body.String())
@@ -185,11 +330,11 @@ func TestDeletePrivateFileChecksClientCode(t *testing.T) {
 		t.Fatalf("unexpected private path %q", rel)
 	}
 
-	wrong := f.do("/files/"+rel, deleteClaims("OTHER", "delete"))
+	wrong := f.do("/files/"+rel, boundClaims(rel, "OTHER", "delete"))
 	if wrong.Code != http.StatusForbidden {
 		t.Errorf("other client: expected 403, got %d: %s", wrong.Code, wrong.Body.String())
 	}
-	noCode := f.do("/files/"+rel, deleteClaims("", "delete"))
+	noCode := f.do("/files/"+rel, boundClaims(rel, "", "delete"))
 	if noCode.Code != http.StatusForbidden {
 		t.Errorf("token without cli_code: expected 403, got %d: %s", noCode.Code, noCode.Body.String())
 	}
@@ -197,7 +342,7 @@ func TestDeletePrivateFileChecksClientCode(t *testing.T) {
 		t.Fatal("a refused private delete removed the file")
 	}
 
-	right := f.do("/files/"+rel, deleteClaims("ACME", "delete"))
+	right := f.do("/files/"+rel, boundClaims(rel, "ACME", "delete"))
 	if right.Code != http.StatusNoContent {
 		t.Fatalf("owner: expected 204, got %d: %s", right.Code, right.Body.String())
 	}
@@ -209,7 +354,8 @@ func TestDeletePrivateFileChecksClientCode(t *testing.T) {
 func TestDeleteUnknownPathIs404(t *testing.T) {
 	f := newDeleteFixture(t, false, time.Hour)
 
-	rec := f.do("/files/2026/1/nothing-here.txt", deleteClaims("", "delete"))
+	const missing = "2026/1/nothing-here.txt"
+	rec := f.do("/files/"+missing, boundClaims(missing, "", "delete"))
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
@@ -221,7 +367,7 @@ func TestDeleteDirectoryIs404(t *testing.T) {
 	rel := f.put(t, "x", "x.txt", "")
 	dir := filepath.Dir(rel)
 
-	rec := f.do("/files/"+dir, deleteClaims("", "delete"))
+	rec := f.do("/files/"+dir, boundClaims(dir, "", "delete"))
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for a directory, got %d: %s", rec.Code, rec.Body.String())
@@ -276,7 +422,7 @@ func TestDeleteMarksMetadataDeleted(t *testing.T) {
 		t.Fatalf("write meta: %v", err)
 	}
 
-	rec := f.do("/files/"+rel, deleteClaims("", "delete"))
+	rec := f.do("/files/"+rel, boundClaims(rel, "", "delete"))
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -304,7 +450,7 @@ func TestDeleteWithoutModerationToleratesNilService(t *testing.T) {
 	f := newDeleteFixture(t, false, time.Hour)
 	rel := f.put(t, "unscanned", "u.txt", "")
 
-	rec := f.do("/files/"+rel, deleteClaims("", "delete"))
+	rec := f.do("/files/"+rel, boundClaims(rel, "", "delete"))
 
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
@@ -350,7 +496,7 @@ func TestReuploadAfterDeleteClearsTombstone(t *testing.T) {
 	mod := f.mod
 	rel := f.put(t, "comeback", "again.txt", "")
 
-	if rec := f.do("/files/"+rel, deleteClaims("", "delete")); rec.Code != http.StatusNoContent {
+	if rec := f.do("/files/"+rel, boundClaims(rel, "", "delete")); rec.Code != http.StatusNoContent {
 		t.Fatalf("delete: expected 204, got %d: %s", rec.Code, rec.Body.String())
 	}
 	if meta, _ := mod.GetMetadata(rel); meta == nil || meta.Status != moderation.StatusDeleted {

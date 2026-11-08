@@ -21,6 +21,10 @@ import (
 //   - the token needs a dedicated "delete" scope, so an upload token that
 //     leaks or is minted too broadly cannot remove anything;
 //   - private paths require the token's client code to match, as for upload;
+//   - the token's delete_path claim must name exactly this file, so a token
+//     removes one file and a shared session cookie removes none. The scope
+//     stays required alongside it: the meta_token returned by an upload is
+//     signed with the same secret and also names a path, but has no scopes;
 //   - the file must be younger than maxAge. Its mtime is the first upload
 //     time (rename preserves it and a deduplicated re-upload never touches
 //     the existing file), so an old file cannot be removed even with a valid
@@ -65,6 +69,14 @@ func (h *DeleteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if status := authorizeClientPath(claims, path); status != 0 {
 		http.Error(w, http.StatusText(status), status)
+		return
+	}
+
+	// An exact match against the cleaned path, the same form an upload returns
+	// as orig.name. Checked before the file is touched, so a token for another
+	// file learns nothing about whether this one exists.
+	if claims.DeletePath != path {
+		http.Error(w, "Forbidden: token is not bound to this file", http.StatusForbidden)
 		return
 	}
 

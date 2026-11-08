@@ -21,8 +21,9 @@ const (
 // Claims represents the JWT claims we expect.
 type Claims struct {
 	jwt.RegisteredClaims
-	ClientCode string   `json:"cli_code,omitempty"` // Client code for private file access
-	Scopes     []string `json:"scopes,omitempty"`   // Permissions: "upload", "read", "delete"
+	ClientCode string   `json:"cli_code,omitempty"`    // Client code for private file access
+	Scopes     []string `json:"scopes,omitempty"`      // Permissions: "upload", "read", "delete"
+	DeletePath string   `json:"delete_path,omitempty"` // The one file a "delete" token may remove
 }
 
 // bearerPrefix introduces a token in the Authorization header.
