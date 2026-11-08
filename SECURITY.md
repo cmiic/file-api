@@ -20,13 +20,14 @@ The security of a deployment depends on assumptions this repository cannot enfor
 - **Moderation is optional and unauthenticated.** It is off unless `MALWARE_SCANNER_URL` or `MEDIA_SCREENER_URL` is set. When set, File API sends upload content to those endpoints over the internal network with no authentication and no TLS, so their reachability is part of File API's trust boundary: whatever can reach them can submit content to them, and whatever can impersonate them can influence a moderation verdict. Those services have their own security policies.
 - **`JWT_SECRET` is required and fails closed.** The service refuses to start when it is missing or shorter than 32 characters. It is an HMAC secret shared with every application that issues tokens; treat it as a credential.
 - **Uploads require a token with the `upload` scope**, and private file access checks the token's client code against the requested path. Every token must carry an `exp` claim; one without an expiry is rejected.
+- **Deletion is off by default.** When an operator enables it, a delete needs a token with the `delete` scope whose `delete_path` claim names exactly that file, so one token removes one file. `DELETE_MAX_AGE` and `DELETE_MAX_AGE_PRIVATE` bound the age of what can be removed, and `unlimited` lifts that bound for the class of file it is set on. Which caller may delete a file is decided by the application that mints the token.
 
 ## In scope
 
 - Authentication or authorization bypass: serving a private file without a valid token, or across client codes
 - Path traversal or filename handling that escapes the storage root
 - Server-side request forgery in the fetch path, or bypass of its scheme and private-address restrictions
-- Token forgery, replay, or scope escalation
+- Token forgery, replay, or scope escalation, including a delete that reaches a file other than the one its token names
 - Bypass of the configured upload size limit leading to unbounded resource use
 
 ## Not a vulnerability
