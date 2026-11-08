@@ -322,8 +322,8 @@ func SanitizeRequestPath(path string) (string, error) {
 
 	// Refuse ".." before Clean, which would collapse "x/../y" into "y" and
 	// leave the check in IsValidRelativePath nothing to see. A percent-encoded
-	// "..%2F" survives the mux and arrives here decoded. No path this service
-	// hands out contains "..", so such a request names no file.
+	// "..%2F" survives the mux and arrives here decoded. SanitizeFilename keeps
+	// ".." out of the paths uploads produce, so such a request names no file.
 	if strings.Contains(path, "..") {
 		return "", fmt.Errorf("invalid path")
 	}
