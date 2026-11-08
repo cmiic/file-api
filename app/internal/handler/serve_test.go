@@ -114,7 +114,7 @@ func TestServeRejectsEncodedAbsoluteAndTraversalPaths(t *testing.T) {
 	// The regression: an encoded absolute path used to reach the storage root
 	// and come back as a 500.
 	f := newServeFixture(t)
-	for _, target := range []string{"/files/%2fetc%2fpasswd", "/files/%2Fetc/passwd", "/files/%2e%2e%2fsecret"} {
+	for _, target := range []string{"/files/%2fetc%2fpasswd", "/files/%2Fetc/passwd", "/files/%2e%2e%2fsecret", "/files/x/..%2F2026/1/a.jpg", "/files/x/%2e%2e/2026/1/a.jpg"} {
 		if rec := f.get(target, nil); rec.Code != http.StatusBadRequest {
 			t.Errorf("%s: got %d, want 400", target, rec.Code)
 		}

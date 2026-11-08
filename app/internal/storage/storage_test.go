@@ -7,6 +7,79 @@ import (
 	"testing"
 )
 
+// TestSanitizeRequestPath pins that a ".." component is refused wherever it
+// would end up, not only when it would escape the storage root.
+func TestSanitizeRequestPath(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{in: "2026/1/a.jpg", want: "2026/1/a.jpg"},
+		{in: "/files/2026/1/a.jpg", want: "2026/1/a.jpg"},
+		{in: "cli/ACME/2026/1/a.jpg", want: "cli/ACME/2026/1/a.jpg"},
+		{in: "2026/./1//a.jpg", want: "2026/1/a.jpg"},
+		{in: "../etc/passwd", wantErr: true},
+		{in: "2026/1/../../../etc/passwd", wantErr: true},
+		{in: "x/../2026/1/a.jpg", wantErr: true},
+		{in: "cli/ACME/../../2026/1/a.jpg", wantErr: true},
+		{in: "2026/../cli/ACME/2026/1/a.jpg", wantErr: true},
+		{in: "2026/1/a..b.jpg", wantErr: true},
+	}
+	for _, tc := range cases {
+		got, err := SanitizeRequestPath(tc.in)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("%q: expected an error, got %q", tc.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%q: unexpected error: %v", tc.in, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("%q: got %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestStoredPathsAreRequestable pins the other half of refusing ".." in request
+// paths: no filename may produce a stored path that a request cannot name.
+func TestStoredPathsAreRequestable(t *testing.T) {
+	s, err := NewStorage(t.TempDir(), 60)
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	names := []string{
+		"report..final.pdf",
+		"a..b.jpg",
+		"x...jpg",
+		"...hidden.jpg",
+		"..jpg",
+		"a....b....c.png",
+		// Truncation that leaves the name part ending in a dot.
+		strings.Repeat("a", 59) + ".bbbbbbbb.jpg",
+	}
+	for _, name := range names {
+		info, err := s.StoreFile(strings.NewReader("bytes of "+name), name, "")
+		if err != nil {
+			t.Errorf("%q: StoreFile: %v", name, err)
+			continue
+		}
+		got, err := SanitizeRequestPath(info.RelativePath)
+		if err != nil {
+			t.Errorf("%q: stored as %q, which a request cannot name: %v", name, info.RelativePath, err)
+			continue
+		}
+		if got != info.RelativePath {
+			t.Errorf("%q: stored as %q, but a request resolves to %q", name, info.RelativePath, got)
+		}
+	}
+}
+
 // TestStoreFileRejectsUnsafeClientCode covers the validation StoreFile does on
 // its own arguments. Both callers validate the client code before handing it
 // over, but StoreFile is exported and its signature promises nothing, so the

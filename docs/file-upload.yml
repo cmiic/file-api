@@ -14,10 +14,11 @@ info:
     **Image Resizing:** Use `/files-rs/` endpoints for on-demand resizing via imgproxy. Original files
     are stored once; thumbnails are generated on request.
     <br><br>
-    **Deletion:** Off by default. When the operator sets `DELETE_MAX_AGE`, `DELETE /files/...` removes a
-    file younger than that duration for a token carrying the `delete` scope. Older files and all files
-    on a deployment without `DELETE_MAX_AGE` cannot be deleted through the API.
-  version: "3.1"
+    **Deletion:** Off by default. When the operator sets `DELETE_MAX_AGE` or `DELETE_MAX_AGE_PRIVATE`,
+    `DELETE /files/...` removes a file within that window for a token carrying the `delete` scope and a
+    `delete_path` claim naming exactly that file. The window is a duration or `unlimited`. Files outside it,
+    and all files of a class with no window, cannot be deleted through the API.
+  version: "4.0"
   contact:
     name: Christoph Stadlbauer
     email: c@miic.at
@@ -38,8 +39,9 @@ components:
       bearerFormat: JWT
       description: >-
         JWT token with claims `cli_code` (for private files) and `scopes`. Scopes in use are `upload` for uploads and
-        URL fetches, `delete` for the opt-in delete endpoint, and `scan:read` for scan metadata. The token must carry
-        an `exp` claim; a token without an expiry is rejected as unauthorized.
+        URL fetches, `delete` for the opt-in delete endpoint, and `scan:read` for scan metadata. A `delete` token also
+        needs a `delete_path` claim holding the path of the one file it may remove, as an upload returned it in
+        `orig.name`. The token must carry an `exp` claim; a token without an expiry is rejected as unauthorized.
     cookieAuth:
       type: apiKey
       in: cookie
@@ -55,7 +57,7 @@ components:
     NotFound:
       description: File not found
     DeleteDisabled:
-      description: Deletion is not enabled on this deployment (`DELETE_MAX_AGE` unset)
+      description: Deletion is not enabled for this class of file on this deployment
     Deleted:
       description: File removed. Reverse-proxy and imgproxy caches are not purged and may keep serving it until their validity runs out.
     FetchFormTooLarge:
@@ -166,10 +168,12 @@ paths:
     delete:
       summary: Delete public file
       description: >-
-        Remove a recently uploaded public file. Requires JWT with `delete` scope, and the file must be younger than
-        the deployment's `DELETE_MAX_AGE`, measured from its first upload. An older file answers `403` with the body
-        `Forbidden: deletion window elapsed`. Deployments without `DELETE_MAX_AGE` do not register this operation and
-        answer `405`.
+        Remove a public file. Requires JWT with `delete` scope and a `delete_path` claim equal to the file's path, and
+        the file must be within the deployment's `DELETE_MAX_AGE`, measured from its first upload; `unlimited` allows
+        any age. A token for another file answers `403` with the body `Forbidden: token is not bound to this file`, and
+        an older file answers `403` with the body `Forbidden: deletion window elapsed`. Deployments without
+        `DELETE_MAX_AGE` do not allow this operation and answer `405`; if `DELETE_MAX_AGE_PRIVATE` is set, a request
+        without a valid token still answers `401` and one without the `delete` scope answers `403`.
       tags:
         - Files
       security:
@@ -225,10 +229,11 @@ paths:
     delete:
       summary: Delete private file
       description: >-
-        Remove a recently uploaded private file. Requires JWT with `delete` scope and a `cli_code` claim matching the
-        path, and the file must be younger than the deployment's `DELETE_MAX_AGE`, measured from its first upload.
-        A foreign client code or an elapsed window answers `403`. Deployments without `DELETE_MAX_AGE` do not
-        register this operation and answer `405`.
+        Remove a private file. Requires JWT with `delete` scope, a `cli_code` claim matching the path, and a
+        `delete_path` claim equal to the file's path, starting with `cli/`. The file must be within the deployment's
+        `DELETE_MAX_AGE_PRIVATE`, or `DELETE_MAX_AGE` when that is unset, measured from its first upload; `unlimited`
+        allows any age. A foreign client code, a token for another file or an elapsed window answers `403`. Deployments
+        with neither variable set do not register this operation and answer `405`.
       tags:
         - Files
       security:
