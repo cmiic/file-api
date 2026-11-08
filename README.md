@@ -117,7 +117,8 @@ File API reads its configuration from the environment. `JWT_SECRET` (or
 | `BASE_PATH` | `/data/files` | Storage root |
 | `MAX_UPLOAD_SIZE` | `209715200` | Upload limit in bytes |
 | `MAX_FILENAME_LEN` | `60` | Maximum stored filename length |
-| `DELETE_MAX_AGE` | empty (disabled) | Enables `DELETE /files/` for files younger than this Go duration, e.g. `24h` |
+| `DELETE_MAX_AGE` | empty (disabled) | Enables `DELETE /files/` for files younger than this Go duration, e.g. `24h`, or for any age with `unlimited` |
+| `DELETE_MAX_AGE_PRIVATE` | `DELETE_MAX_AGE` | The same for private files, overriding `DELETE_MAX_AGE` for them |
 | `MALWARE_SCANNER_URL` | empty (disabled) | Malware scanner base URL |
 | `MEDIA_SCREENER_URL` | empty (disabled) | Media screener base URL |
 | `SCAN_TIMEOUT_MS` | `30000` | Per-scanner HTTP timeout |
@@ -152,21 +153,43 @@ rendered at <https://cmiic.github.io/file-api/>.
 
 ## Deleting files
 
-The store is write-once by design: URLs are shared across applications and embedded in places such as newsletters that cannot be updated once sent. Deletion is therefore opt-in and bounded, intended for the accidental upload that is noticed shortly after it happens.
+The store is write-once by design: URLs are shared across applications and embedded in places such as newsletters that cannot be updated once sent. Deletion is therefore opt-in and narrow. It suits the accidental upload that is noticed shortly after it happens, and an application that uses File API as backing storage and keeps track of what it stored.
 
-Set `DELETE_MAX_AGE` to a positive Go duration (`30m`, `24h`) to register `DELETE /files/{path}` and `DELETE /files/cli/{CLI_CODE}/{path}`. Unset, the route does not exist and the mux answers `405`. A value that does not parse, or is zero or negative, stops the service at startup rather than silently changing the window.
+Set `DELETE_MAX_AGE` or `DELETE_MAX_AGE_PRIVATE` to register `DELETE /files/{path}` and `DELETE /files/cli/{CLI_CODE}/{path}`. Each takes a positive Go duration (`30m`, `24h`) or the keyword `unlimited`, which allows deletion at any age. Go durations have no unit for days or years. A value that does not parse, or is zero or negative, stops the service at startup rather than silently changing the window.
 
-A delete succeeds with `204` only when all of the following hold. Otherwise it answers `403` (missing scope, foreign client code, or window elapsed), `404` (no such file), or `400` (invalid path).
+| `DELETE_MAX_AGE` | `DELETE_MAX_AGE_PRIVATE` | Public files | Private files |
+| ---------------- | ------------------------ | ------------ | ------------- |
+| unset | unset | off | off |
+| `24h` | unset | younger than 24h | younger than 24h |
+| unset | `unlimited` | off | any age |
+| `24h` | `unlimited` | younger than 24h | any age |
+| `unlimited` | unset | any age | any age |
 
-- The token carries the `delete` scope. Upload tokens do not, so a leaked or over-broad upload token cannot remove anything. Mint `delete` only where your application has established that the caller owns the file.
+Where deletion is off, the request answers `405`. On a deployment with a window for private files only, a public path answers `401` first when the request has no valid token, and `403` when the token lacks the `delete` scope.
+
+A delete succeeds with `204` only when all of the following hold. Otherwise it answers `403` (missing scope, foreign client code, token bound to another file, or window elapsed), `404` (no such file), or `400` (invalid path).
+
+- The token carries the `delete` scope. Upload tokens do not, so a leaked or over-broad upload token cannot remove anything.
 - For a private path, the token's `cli_code` matches the path, as for upload.
-- The file is younger than `DELETE_MAX_AGE`. The age is the stored file's mtime, which is the time of the first upload: a deduplicated re-upload of identical content returns the existing path without touching the file. An old file cannot be removed even with a valid token, which bounds what a wrongly minted token can do to the archive.
+- The token's `delete_path` claim is exactly the path of this file, as an upload returned it in `orig.name`. Mint a token per file, with a short `exp`, once your application has established that the caller may delete it. A session token shared across requests names no file and cannot delete anything.
+- The file is within the window for its class. The age is the stored file's mtime, which is the time of the first upload: a deduplicated re-upload of identical content returns the existing path without touching the file. Under a finite window an old file cannot be removed even with a valid token, which bounds what a wrongly minted token can do to the archive.
+
+The claims of a token that may delete one private file:
+
+```json
+{
+  "scopes": ["delete"],
+  "cli_code": "ACME",
+  "delete_path": "cli/ACME/2026/11/report-b01cf64a61176d0be3cdf9c8e091ea4e96333d83.pdf",
+  "exp": 1794000060
+}
+```
 
 What deletion does not do:
 
-- It does not purge caches. The reverse proxy and imgproxy cache public files with a long validity, so the bytes can stay reachable from cache after a `204` until that validity runs out.
-- It does not distinguish uploaders. Two applications that upload identical content under the same filename within the window share one path, and a delete by either removes it for both.
-- It does not survive a restore that resets timestamps. Restore the storage volume with mtimes preserved (`rsync -a`, `cp -p`), or every restored file looks freshly uploaded and falls inside the window.
+- It does not purge caches. The reverse proxy and imgproxy cache public files with a long validity, and File API itself marks them cacheable for a year, so the bytes can stay reachable from a cache after a `204` until that validity runs out. Weigh that before setting `DELETE_MAX_AGE` to `unlimited`.
+- It does not distinguish uploaders. Identical content uploaded under the same filename in the same month shares one path, within a client code or among public uploads, and a delete removes it for everyone holding that path. File API does not track who that is: an application that may reference a file more than once, or that shares a client code with another application, has to account for it.
+- A finite window does not survive a restore that resets timestamps. Restore the storage volume with mtimes preserved (`rsync -a`, `cp -p`), or every restored file looks freshly uploaded and falls inside the window.
 
 When moderation is enabled the scan metadata is kept and its status set to `deleted`, so a consumer polling `/meta/files/{path}` before persisting its own record sees that the file is gone. See [docs/moderation-integration.md](docs/moderation-integration.md).
 
