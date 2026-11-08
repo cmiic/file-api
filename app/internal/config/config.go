@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -12,6 +13,11 @@ import (
 
 // MinJWTSecretLen is the minimum required length for JWT secrets.
 const MinJWTSecretLen = 32
+
+// DeleteAnyAge is the window of a file class configured as "unlimited". It is
+// the largest Duration: time.Since saturates there, so no file is ever older
+// and the handler's age comparison needs no special case.
+const DeleteAnyAge = time.Duration(math.MaxInt64)
 
 // Config holds all application configuration.
 type Config struct {
@@ -28,9 +34,11 @@ type Config struct {
 	MaxUploadSize  int64
 	MaxFilenameLen int
 
-	// Deletion. Zero disables the DELETE /files/ route entirely; a positive
-	// duration enables it and bounds how old a file may be when it is deleted.
-	DeleteMaxAge time.Duration
+	// Deletion windows, bounding how old a file may be when it is deleted. Zero
+	// disables deletion for that class of file; DeleteAnyAge removes the bound.
+	// The DELETE /files/ route is registered only when at least one is set.
+	DeleteMaxAge        time.Duration // public files
+	DeleteMaxAgePrivate time.Duration // private files
 
 	// Moderation - Scanners
 	MalwareScannerURL string // e.g., http://malware-scanner:8081
@@ -61,7 +69,7 @@ func Load() *Config {
 		log.Fatalf("FATAL: JWT secret must be at least %d characters (got %d)", MinJWTSecretLen, len(jwtSecret))
 	}
 
-	deleteMaxAge, err := parseDeleteMaxAge(os.Getenv("DELETE_MAX_AGE"))
+	deleteMaxAge, deleteMaxAgePrivate, err := deleteWindows(os.Getenv("DELETE_MAX_AGE"), os.Getenv("DELETE_MAX_AGE_PRIVATE"))
 	if err != nil {
 		// Fail fast rather than fall back: a typo here must not silently
 		// disable deletion (the app would then get 405s it does not expect)
@@ -75,7 +83,9 @@ func Load() *Config {
 		JWTSecret:      jwtSecret,
 		MaxUploadSize:  getEnvInt64("MAX_UPLOAD_SIZE", 200*1024*1024), // 200MB
 		MaxFilenameLen: getEnvInt("MAX_FILENAME_LEN", 60),
-		DeleteMaxAge:   deleteMaxAge,
+
+		DeleteMaxAge:        deleteMaxAge,
+		DeleteMaxAgePrivate: deleteMaxAgePrivate,
 
 		// Moderation - Scanners (empty = disabled)
 		MalwareScannerURL: getEnv("MALWARE_SCANNER_URL", ""),
@@ -94,24 +104,60 @@ func Load() *Config {
 	}
 }
 
-// parseDeleteMaxAge interprets the DELETE_MAX_AGE variable. Unset or empty
-// means deletion is disabled, which is the default and the historical
-// behavior. Anything else, including a value that is only whitespace, must
-// be a positive Go duration such as "30m" or "24h"; a value that does not
-// parse, or is zero or negative, is an error so that Load can refuse to
-// start. Surrounding whitespace around a real value is tolerated.
-func parseDeleteMaxAge(raw string) (time.Duration, error) {
+// deleteWindows resolves the public and private deletion windows from the raw
+// DELETE_MAX_AGE and DELETE_MAX_AGE_PRIVATE values. DELETE_MAX_AGE covers both
+// classes of file unless DELETE_MAX_AGE_PRIVATE overrides it for private ones,
+// so a deployment that sets only DELETE_MAX_AGE keeps one window for all files.
+func deleteWindows(public, private string) (publicAge, privateAge time.Duration, err error) {
+	publicAge, err = parseDeleteMaxAge("DELETE_MAX_AGE", public)
+	if err != nil {
+		return 0, 0, err
+	}
+	privateAge, err = parseDeleteMaxAge("DELETE_MAX_AGE_PRIVATE", private)
+	if err != nil {
+		return 0, 0, err
+	}
+	if privateAge == 0 {
+		privateAge = publicAge
+	}
+	return publicAge, privateAge, nil
+}
+
+// parseDeleteMaxAge interprets a deletion window variable, whose name is used
+// in error messages. Unset or empty means no window of its own, which is the
+// default. Anything else, including a value that is only whitespace, must be
+// a positive Go duration such as "30m" or "24h", or the keyword "unlimited";
+// a value that does not parse, or is zero or negative, is an error so that
+// Load can refuse to start. Surrounding whitespace around a real value is
+// tolerated.
+func parseDeleteMaxAge(name, raw string) (time.Duration, error) {
 	if raw == "" {
 		return 0, nil
 	}
-	d, err := time.ParseDuration(strings.TrimSpace(raw))
+	value := strings.TrimSpace(raw)
+	if value == "unlimited" {
+		return DeleteAnyAge, nil
+	}
+	d, err := time.ParseDuration(value)
 	if err != nil {
-		return 0, fmt.Errorf("DELETE_MAX_AGE %q is not a duration (use e.g. 30m or 24h): %w", raw, err)
+		return 0, fmt.Errorf("%s %q is not a duration (use e.g. 30m or 24h, or unlimited): %w", name, raw, err)
 	}
 	if d <= 0 {
-		return 0, fmt.Errorf("DELETE_MAX_AGE %q must be positive; unset it to disable deletion", raw)
+		return 0, fmt.Errorf("%s %q must be positive; unset it to remove this window", name, raw)
 	}
 	return d, nil
+}
+
+// DescribeDeleteWindow renders a deletion window for the startup log.
+func DescribeDeleteWindow(d time.Duration) string {
+	switch d {
+	case 0:
+		return "off"
+	case DeleteAnyAge:
+		return "any age"
+	default:
+		return "younger than " + d.String()
+	}
 }
 
 // getSecret reads a secret from env var or file path (for container secrets).

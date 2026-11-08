@@ -13,6 +13,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 
 	"file-api/internal/auth"
+	"file-api/internal/config"
 	"file-api/internal/middleware"
 	"file-api/internal/moderation"
 	"file-api/internal/storage"
@@ -27,8 +28,6 @@ type deleteFixture struct {
 	mod      *moderation.Service // nil unless the fixture was built moderated
 	base     string
 	metaPath string
-	// window is the configured DELETE_MAX_AGE for this fixture.
-	window time.Duration
 }
 
 // newDeleteFixture builds the fixture. With moderated set, a metadata-only
@@ -36,6 +35,13 @@ type deleteFixture struct {
 // check sees the files the handler deletes) and exposed as f.mod; otherwise
 // the handler gets the nil service main.go passes when no scanner is set.
 func newDeleteFixture(t *testing.T, moderated bool, window time.Duration) *deleteFixture {
+	t.Helper()
+	return newDeleteFixtureWindows(t, moderated, window, window)
+}
+
+// newDeleteFixtureWindows is newDeleteFixture with a separate window for public
+// and private files.
+func newDeleteFixtureWindows(t *testing.T, moderated bool, publicMaxAge, privateMaxAge time.Duration) *deleteFixture {
 	t.Helper()
 	base := t.TempDir()
 	filesDir := filepath.Join(base, "files")
@@ -52,13 +58,13 @@ func newDeleteFixture(t *testing.T, moderated bool, window time.Duration) *delet
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("DELETE /files/", NewDeleteHandler(store, mod, window))
+	mux.Handle("DELETE /files/", NewDeleteHandler(store, mod, publicMaxAge, privateMaxAge))
 	// The serve routes exist in main.go too; registering GET here makes the
 	// "disabled" test below meaningful, since the mux only answers 405 for a
 	// path some other method handles.
 	mux.Handle("GET /files/", NewServeHandler(store))
 
-	return &deleteFixture{mux: mux, store: store, mod: mod, base: filesDir, metaPath: metaPath, window: window}
+	return &deleteFixture{mux: mux, store: store, mod: mod, base: filesDir, metaPath: metaPath}
 }
 
 // put stores content under the uploader filename and returns the relative
@@ -239,7 +245,7 @@ func TestDeleteThroughJWTMiddleware(t *testing.T) {
 
 	mux := http.NewServeMux()
 	jwtAuth := middleware.NewJWTAuth(secret)
-	mux.Handle("DELETE /files/", jwtAuth.Middleware(true)(NewDeleteHandler(store, nil, time.Hour)))
+	mux.Handle("DELETE /files/", jwtAuth.Middleware(true)(NewDeleteHandler(store, nil, time.Hour, time.Hour)))
 
 	sign := func(claims jwt.Claims) string {
 		t.Helper()
@@ -348,6 +354,82 @@ func TestDeletePrivateFileChecksClientCode(t *testing.T) {
 	}
 	if f.exists(rel) {
 		t.Error("owner's delete left the file in place")
+	}
+}
+
+func TestDeleteWindowsApplyPerClassOfFile(t *testing.T) {
+	cases := []struct {
+		name             string
+		public, private  time.Duration
+		wantPub, wantPrv int
+	}{
+		{"private unlimited, public finite", time.Hour, config.DeleteAnyAge, http.StatusForbidden, http.StatusNoContent},
+		{"public unlimited, private finite", config.DeleteAnyAge, time.Hour, http.StatusNoContent, http.StatusForbidden},
+		{"both unlimited", config.DeleteAnyAge, config.DeleteAnyAge, http.StatusNoContent, http.StatusNoContent},
+		{"private only", 0, config.DeleteAnyAge, http.StatusMethodNotAllowed, http.StatusNoContent},
+		{"public only", config.DeleteAnyAge, 0, http.StatusNoContent, http.StatusMethodNotAllowed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDeleteFixtureWindows(t, false, tc.public, tc.private)
+			pub := f.put(t, "public", "pub.txt", "")
+			prv := f.put(t, "private", "prv.txt", "ACME")
+			// Decades old, as far past the finite windows as a file gets.
+			f.age(t, pub, 30*365*24*time.Hour)
+			f.age(t, prv, 30*365*24*time.Hour)
+
+			if rec := f.do("/files/"+pub, boundClaims(pub, "", "delete")); rec.Code != tc.wantPub {
+				t.Errorf("public: expected %d, got %d: %s", tc.wantPub, rec.Code, rec.Body.String())
+			}
+			if rec := f.do("/files/"+prv, boundClaims(prv, "ACME", "delete")); rec.Code != tc.wantPrv {
+				t.Errorf("private: expected %d, got %d: %s", tc.wantPrv, rec.Code, rec.Body.String())
+			}
+			if got := f.exists(pub); got == (tc.wantPub == http.StatusNoContent) {
+				t.Errorf("public: exists=%v after %d", got, tc.wantPub)
+			}
+			if got := f.exists(prv); got == (tc.wantPrv == http.StatusNoContent) {
+				t.Errorf("private: exists=%v after %d", got, tc.wantPrv)
+			}
+		})
+	}
+}
+
+func TestDeleteDisabledClassAnswers405WithAllow(t *testing.T) {
+	f := newDeleteFixtureWindows(t, false, 0, config.DeleteAnyAge)
+	pub := f.put(t, "public", "pub.txt", "")
+
+	rec := f.do("/files/"+pub, boundClaims(pub, "", "delete"))
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if allow := rec.Header().Get("Allow"); allow != "GET, HEAD" {
+		t.Errorf("expected Allow: GET, HEAD, got %q", allow)
+	}
+}
+
+func TestDeleteWindowFollowsCleanedPathNotRoute(t *testing.T) {
+	// An encoded slash leaves the path one segment for the mux, so the class
+	// of file can only be told from the cleaned path. A private file spelled
+	// this way must get the private window, and stay refused when private
+	// deletion is off.
+	f := newDeleteFixtureWindows(t, false, time.Hour, 2*time.Hour)
+	rel := f.put(t, "private", "enc.txt", "ACME")
+	target := "/files/" + strings.ReplaceAll(rel, "/", "%2F")
+
+	f.age(t, rel, 90*time.Minute)
+	if rec := f.do(target, boundClaims(rel, "ACME", "delete")); rec.Code != http.StatusNoContent {
+		t.Fatalf("inside the private window: expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	strict := newDeleteFixtureWindows(t, false, time.Hour, 0)
+	rel = strict.put(t, "private", "enc.txt", "ACME")
+	target = "/files/" + strings.ReplaceAll(rel, "/", "%2F")
+	if rec := strict.do(target, boundClaims(rel, "ACME", "delete")); rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("private files off: expected 405, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strict.exists(rel) {
+		t.Error("an encoded slash deleted a private file with private deletion off")
 	}
 }
 

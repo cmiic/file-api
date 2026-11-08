@@ -76,7 +76,7 @@ func main() {
 	serveHandler := handler.NewServeHandler(store)
 	healthHandler := handler.NewHealthHandler()
 	metaHandler := handler.NewMetaHandler(moderationSvc)
-	deleteHandler := handler.NewDeleteHandler(store, moderationSvc, cfg.DeleteMaxAge)
+	deleteHandler := handler.NewDeleteHandler(store, moderationSvc, cfg.DeleteMaxAge, cfg.DeleteMaxAgePrivate)
 
 	// Create router using Go 1.22+ ServeMux with pattern matching
 	mux := http.NewServeMux()
@@ -117,15 +117,21 @@ func main() {
 	mux.Handle("POST /file-resize/", jwtAuth.Middleware(true)(fetchHandler))
 
 	// Delete endpoint (JWT required with delete scope), opt-in. Not registered
-	// at all when DELETE_MAX_AGE is unset, so the mux answers 405 and the
-	// store keeps its historical write-once contract.
+	// at all when neither DELETE_MAX_AGE nor DELETE_MAX_AGE_PRIVATE is set, so
+	// the mux answers 405 and the store keeps its historical write-once
+	// contract.
 	// DELETE /files/{path}            - public file
 	// DELETE /files/cli/{code}/{path} - private file, cli_code must match
-	if cfg.DeleteMaxAge > 0 {
+	//
+	// One route on purpose, not one per class of file: the mux matches the
+	// escaped path, so an encoded slash would reach the wrong route. The
+	// handler picks the window from the cleaned path instead.
+	if cfg.DeleteMaxAge > 0 || cfg.DeleteMaxAgePrivate > 0 {
 		mux.Handle("DELETE /files/", jwtAuth.Middleware(true)(deleteHandler))
-		log.Printf("Deletion enabled: files younger than %s may be deleted", cfg.DeleteMaxAge)
+		log.Printf("Deletion enabled: public files %s, private files %s",
+			config.DescribeDeleteWindow(cfg.DeleteMaxAge), config.DescribeDeleteWindow(cfg.DeleteMaxAgePrivate))
 	} else {
-		log.Println("Deletion disabled (DELETE_MAX_AGE not set)")
+		log.Println("Deletion disabled (DELETE_MAX_AGE and DELETE_MAX_AGE_PRIVATE not set)")
 	}
 
 	// Metadata endpoint (JWT required with scan:read scope)
