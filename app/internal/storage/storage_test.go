@@ -7,6 +7,43 @@ import (
 	"testing"
 )
 
+// TestSanitizeRequestPath pins that a ".." component is refused wherever it
+// would end up, not only when it would escape the storage root.
+func TestSanitizeRequestPath(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{in: "2026/1/a.jpg", want: "2026/1/a.jpg"},
+		{in: "/files/2026/1/a.jpg", want: "2026/1/a.jpg"},
+		{in: "cli/ACME/2026/1/a.jpg", want: "cli/ACME/2026/1/a.jpg"},
+		{in: "2026/./1//a.jpg", want: "2026/1/a.jpg"},
+		{in: "../etc/passwd", wantErr: true},
+		{in: "2026/1/../../../etc/passwd", wantErr: true},
+		{in: "x/../2026/1/a.jpg", wantErr: true},
+		{in: "cli/ACME/../../2026/1/a.jpg", wantErr: true},
+		{in: "2026/../cli/ACME/2026/1/a.jpg", wantErr: true},
+		{in: "2026/1/a..b.jpg", wantErr: true},
+	}
+	for _, tc := range cases {
+		got, err := SanitizeRequestPath(tc.in)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("%q: expected an error, got %q", tc.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%q: unexpected error: %v", tc.in, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("%q: got %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 // TestStoreFileRejectsUnsafeClientCode covers the validation StoreFile does on
 // its own arguments. Both callers validate the client code before handing it
 // over, but StoreFile is exported and its signature promises nothing, so the
