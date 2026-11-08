@@ -83,6 +83,9 @@ func TestMetaHandlerRejectsEncodedTraversal(t *testing.T) {
 		"/meta/files/%2e%2e/secret",
 		"/meta/files/%2e%2e%2f%2e%2e%2f%2e%2e%2fetc/passwd",
 		"/meta/files/..%2fsecret",
+		// Stays inside the meta directory once cleaned, and is refused anyway.
+		"/meta/files/x/..%2F2026/1/photo.jpg",
+		"/meta/files/x/%2e%2e/2026/1/photo.jpg",
 	}
 
 	for _, target := range targets {

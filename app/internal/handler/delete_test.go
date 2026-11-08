@@ -243,6 +243,9 @@ func TestDeleteRejectsEncodedTraversal(t *testing.T) {
 		"/files/%2e%2e%2fvictim.txt",
 		"/files/%2e%2e/victim.txt",
 		"/files/..%2fvictim.txt",
+		// Stays inside the root once cleaned, and is refused anyway.
+		"/files/x/..%2F2026/1/victim.txt",
+		"/files/cli/ACME/..%2F..%2F2026/1/victim.txt",
 		// Encoded absolute paths sanitize to a leading "/" and must be a 400
 		// here, not the 500 the storage root's containment error would give.
 		"/files/%2fetc%2fpasswd",
