@@ -21,6 +21,11 @@ func TestRequestFilePath(t *testing.T) {
 		{"/files/2026/1/a.jpg", "2026/1/a.jpg", true},
 		{"/files/cli/ACME/2026/1/a.pdf", "cli/ACME/2026/1/a.pdf", true},
 		{"/files/../etc/passwd", "", false},
+		// A ".." that would stay inside the root is refused too, rather than
+		// collapsed into a path the caller never literally named.
+		{"/files/x/../2026/1/a.jpg", "", false},
+		{"/files/cli/ACME/../../2026/1/a.jpg", "", false},
+		{"/files/2026/../cli/ACME/2026/1/a.jpg", "", false},
 		{"/files//etc/passwd", "", false}, // decoded %2f: absolute
 		// The bare prefix resolves to the storage root, which the handlers
 		// stat as a directory and answer with 404.

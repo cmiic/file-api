@@ -67,7 +67,7 @@ If `MALWARE_SCANNER_URL` and `MEDIA_SCREENER_URL` are both empty, moderation is 
 
 A file stored again while its scan is still running — a deduplicated re-upload, or an identical upload that recreates the path right after the scan deleted it as malware — is scanned once more when that scan finishes, so the verdict on record describes the bytes that are actually stored.
 
-When a file is removed through the opt-in `DELETE /files/` endpoint (see `DELETE_MAX_AGE` in the README), the metadata record is kept and its `status` set to `deleted`, with `completed_at` updated and any earlier scan results preserved. A file that had no record yet, such as a private upload, gets one. A scan that was still running when the file was deleted does not overwrite that record, whatever it concluded, and does not queue a retry. When the same path is stored again (identical bytes under the same filename within the same month, through upload or URL fetch), the `deleted` record is removed so the metadata describes the file that now exists.
+When a file is removed through the opt-in `DELETE /files/` endpoint (see [Deleting files](../README.md#deleting-files) in the README), the metadata record is kept and its `status` set to `deleted`, with `completed_at` updated and any earlier scan results preserved. A file that had no record yet, such as a private upload, gets one. A scan that was still running when the file was deleted does not overwrite that record, whatever it concluded, and does not queue a retry. When the same path is stored again (identical bytes under the same filename within the same month, through upload or URL fetch), the `deleted` record is removed so the metadata describes the file that now exists.
 
 ## Scan Order
 
