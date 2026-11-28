@@ -15,32 +15,50 @@ import (
 //
 // The store is otherwise write-once: URLs are shared across applications and
 // embedded in places (newsletters, public pages) that cannot be updated once
-// sent. Deletion exists for the accidental upload that is noticed shortly
-// after it happens, and the handler is shaped around that single use:
+// sent. Deletion is therefore opt-in and narrow, whether it serves the
+// accidental upload noticed shortly after it happens or an application that
+// keeps track of what it stored:
 //
 //   - the token needs a dedicated "delete" scope, so an upload token that
 //     leaks or is minted too broadly cannot remove anything;
 //   - private paths require the token's client code to match, as for upload;
-//   - the file must be younger than maxAge. Its mtime is the first upload
-//     time (rename preserves it and a deduplicated re-upload never touches
-//     the existing file), so an old file cannot be removed even with a valid
-//     token. That bounds what a wrong token can do to the archive.
+//   - the token's delete_path claim must name exactly this file, so a token
+//     removes one file and a shared session cookie removes none. The scope
+//     stays required alongside it: the meta_token returned by an upload is
+//     signed with the same secret and also names a path, but has no scopes;
+//   - the file must be younger than the window for its class of file, public
+//     or private. Its mtime is the first upload time (rename preserves it and
+//     a deduplicated re-upload never touches the existing file), so under a
+//     finite window an old file cannot be removed even with a valid token.
+//     That bounds what a wrong token can do to the archive. An operator can
+//     lift the bound per class by configuring it as unlimited.
 //
 // What this handler does not promise: the bytes may remain in reverse-proxy
-// and image caches until they expire there, and two uploaders of identical
-// content within the window share one path, so a delete by either removes
-// it for both.
+// and image caches until they expire there, and uploaders of identical content
+// under the same filename in the same month share one path, so a delete by
+// any of them removes it for all.
 type DeleteHandler struct {
-	storage    *storage.Storage
-	moderation *moderation.Service
-	maxAge     time.Duration
+	storage       *storage.Storage
+	moderation    *moderation.Service
+	publicMaxAge  time.Duration
+	privateMaxAge time.Duration
 }
 
 // NewDeleteHandler creates a DeleteHandler. mod may be nil when moderation is
-// disabled; maxAge must be positive, which main.go guarantees by not
-// registering the route otherwise.
-func NewDeleteHandler(s *storage.Storage, mod *moderation.Service, maxAge time.Duration) *DeleteHandler {
-	return &DeleteHandler{storage: s, moderation: mod, maxAge: maxAge}
+// disabled. A zero window disables deletion for that class of file; main.go
+// does not register the route when both are zero.
+func NewDeleteHandler(s *storage.Storage, mod *moderation.Service, publicMaxAge, privateMaxAge time.Duration) *DeleteHandler {
+	return &DeleteHandler{storage: s, moderation: mod, publicMaxAge: publicMaxAge, privateMaxAge: privateMaxAge}
+}
+
+// maxAgeFor returns the window for a cleaned path. It has to be decided here
+// rather than by routing: the mux matches the escaped path, so an encoded
+// slash in "cli%2FACME%2F..." would reach a route for public files.
+func (h *DeleteHandler) maxAgeFor(path string) time.Duration {
+	if storage.IsPrivatePath(path) {
+		return h.privateMaxAge
+	}
+	return h.publicMaxAge
 }
 
 // ServeHTTP handles DELETE /files/{path} and DELETE /files/cli/{code}/{path}.
@@ -63,8 +81,27 @@ func (h *DeleteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msgInvalidPath, http.StatusBadRequest)
 		return
 	}
+
+	// With a window for only one class of file the route exists, so this is
+	// the handler's answer rather than the mux's. Same status, same meaning:
+	// deletion is not offered for this file.
+	maxAge := h.maxAgeFor(path)
+	if maxAge == 0 {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	if status := authorizeClientPath(claims, path); status != 0 {
 		http.Error(w, http.StatusText(status), status)
+		return
+	}
+
+	// An exact match against the cleaned path, the same form an upload returns
+	// as orig.name. Checked before the file is touched, so a token for another
+	// file learns nothing about whether this one exists.
+	if claims.DeletePath != path {
+		http.Error(w, "Forbidden: token is not bound to this file", http.StatusForbidden)
 		return
 	}
 
@@ -77,7 +114,7 @@ func (h *DeleteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// knows the path, so confirming that the file exists tells them nothing
 	// new, and a distinct answer lets the application explain to its user why
 	// the file stays.
-	if time.Since(info.ModTime()) > h.maxAge {
+	if time.Since(info.ModTime()) > maxAge {
 		http.Error(w, "Forbidden: deletion window elapsed", http.StatusForbidden)
 		return
 	}

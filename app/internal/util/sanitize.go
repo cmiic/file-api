@@ -23,11 +23,15 @@ var nonAlphanumeric = regexp.MustCompile(`[^a-zA-Z0-9\-_.]`)
 // multiDash matches multiple consecutive dashes or underscores
 var multiDash = regexp.MustCompile(`[-_]{2,}`)
 
+// multiDot matches multiple consecutive dots
+var multiDot = regexp.MustCompile(`\.{2,}`)
+
 // SanitizeFilename cleans a filename to be safe for storage.
 // Replicates the logic from legacy optutils.lua:
 // - Replaces dangerous shell characters
 // - Converts German umlauts to ASCII equivalents
 // - Removes any remaining non-alphanumeric characters
+// - Collapses consecutive dots
 // - Truncates to maxLen characters (name part only, not extension)
 func SanitizeFilename(filename string, maxLen int) string {
 	if filename == "" {
@@ -58,6 +62,10 @@ func SanitizeFilename(filename string, maxLen int) string {
 
 	// Remove multiple consecutive dashes or underscores
 	s = multiDash.ReplaceAllString(s, "-")
+
+	// Collapse consecutive dots. A stored path containing ".." could never be
+	// requested, because request paths refuse it as traversal.
+	s = multiDot.ReplaceAllString(s, ".")
 
 	// Trim leading/trailing dashes, underscores, dots
 	s = strings.Trim(s, "-_.")

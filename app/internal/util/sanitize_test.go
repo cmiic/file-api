@@ -78,6 +78,8 @@ func TestSanitizeFilename(t *testing.T) {
 		{"semicolons to dashes", "file;name.pdf", 60, "file-name.pdf"},
 		{"slashes to underscores", "path/file.pdf", 60, "path_file.pdf"},
 		{"backslashes to underscores", "path\\file.pdf", 60, "path_file.pdf"},
+		{"consecutive dots collapse", "report..final.pdf", 60, "report.final.pdf"},
+		{"dots before the extension collapse", "x...jpg", 60, "x.jpg"},
 
 		// German umlauts
 		{"umlaut ä", "bäcker.pdf", 60, "baecker.pdf"},
